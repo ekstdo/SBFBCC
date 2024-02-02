@@ -76,7 +76,7 @@ fn multinv(mut a: isize, mut n: isize) -> isize {
 // operations and is separated by IO Operations
 //
 // general trait to represent the affine liner transformations
-pub trait BFAffineT<T: Sized + Clone + Copy>: Sized {
+pub trait BFAffineT<T: Copy + Ord>: Sized {
     // generates the identity representation of 
     fn new_ident() -> Self; 
     fn add_const(&mut self, i: T, v: w8);
@@ -115,9 +115,15 @@ pub trait BFAffineT<T: Sized + Clone + Copy>: Sized {
 
     fn get_affine(&self, i: T) -> w8;
     fn get_mat(&self, i:T, j:T) -> w8;
+    fn get_involved(&self) -> BTreeSet<T> {
+        self.get_involved_lin().union(&self.get_involved_aff()).map(|x| *x).collect()
+    }
+    fn get_involved_lin(&self) -> BTreeSet<T>;
+    fn get_involved_aff(&self) -> BTreeSet<T>;
 
-    fn shift_keys(&mut self, by: isize);
+    fn shift_keys(&mut self, by: T);
 }
+
 
 // simple and naive approach to represent the arbitrary dimensional matrix
 #[derive(Debug)]
@@ -288,6 +294,12 @@ impl BFAffineT<isize> for BFAddMap {
         self.affine.clear();
     }
     
+    fn get_involved_lin(&self) -> BTreeSet<T> {
+        self.affine.keys().collect()
+    }
+    fn get_involved_aff(&self) -> BTreeSet<T> {
+        todo!()
+    }
 }
 
 #[derive(Debug)]
@@ -453,7 +465,76 @@ pub enum Opcode {
     Mult(i16, i16, w8),
 }
 
+// BrainFuck AFfine Linear Optimizing Data Structure
+pub trait BFAFLODS<T: Copy + Ord, U: BFAffineT<T>> {
+    // in order to compile the affine transforms, we need to make sure, we 
+    // do the least amount of unnecessary computations and caching
+    //
+    // for that we can make use of some graph theory: When we see the matrix as
+    // graph, we can first get all strongly connected components (which need
+    // some form of caching the result) and topologically sort the rest 
+    //
+    // we then go backwards in the topological sorting, because these elements 
+    // are the ones, that only dependent on other variables, while no other variables
+    // depend on them
+    fn vertices(t: &U) -> Vec<T>;
+    fn edges(t: &U) -> Vec<(T, T)>;
+    fn linearize(t: U) -> Vec<Opcode>;
+}
 
+impl BFAFLODS<isize, BFAddMap> for BFAddMap {
+    fn linearize(t: Self) -> Vec<Opcode> {
+        // 1. step: get strongly connected components from the hashmaps 
+        // 2. step: topologically sort them 
+        //
+        // we can combine the first two steps by using Tarjan's algorithm,
+        // that outputs the strongly connected components in reverse DAG-TS
+        // order anyway:
+        //
+        let mut index = 0;
+        let mut s = Vec::new(); // stack to be used
+        let mut components = Vec::new();
+        for v in Self::vertices(t) {
+            if v.index.is_none() {
+                strongconnect(v);
+            }
+        }
+        fn strongconnect(v){
+            v.index = index;
+            v.lowlink = index;
+            index += 1;
+            s.push(v);
+            v.onstack = true;
+            for (v, w) in Self::edges(t) {
+                match v.index {
+                    None => {
+                        strongconnect(w);
+                        v.lowlink = min(v.lowlink, w.lowlink);
+                    }
+                    Some(x) if w.onstack => {
+                        v.lowlink = min(v.lowlink, w.index);
+                    }
+                }
+            }
+
+            if Some(v.lowlink) == v.index {
+                let mut w = stack.pop();
+                w.onstack = false;
+                let mut current_component = vec![w];
+                while w != v {
+                    w = stack.pop();
+                    w.onstack = false;
+                    current_component.push(w);
+                }
+            }
+        }
+
+        //
+        // 3. convert into opcode
+        //
+        todo!()
+    }
+}
 
 pub fn linearize<T: BFAffineT<isize>>(tree: Vec<Optree<T>>) -> Vec<Opcode> {
     todo!()
