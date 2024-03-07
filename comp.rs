@@ -1,21 +1,26 @@
 // Brainfuck bytecode compiler by ekstdo
-
+#![feature(impl_trait_in_assoc_type)]
+#![allow(non_camel_case_types)]
 use std::env;
 use std::fs;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::num::Wrapping;
 use std::iter::FromIterator;
+use std::ops::{Add, Sub, Index};
+use std::cmp::Ord;
+use std::cell::RefCell;
+use std::rc::Rc;
 type w8 = Wrapping<u8>;
 
 // Utility functions
 
-fn shift_hashmap<T: Copy>(mut hashmap: &mut BTreeMap<isize, T>, by: isize) {
+fn shift_hashmap<T: Copy>(hashmap: &mut BTreeMap<isize, T>, by: isize) {
     let mut tbc = hashmap.keys().map(|x| *x).collect::<BTreeSet<isize>>();
     while!tbc.is_empty() {
         let mut old_key = *tbc.iter().next().unwrap();
         let mut new_key = old_key + by;
         let mut tmp = *hashmap.get(&old_key).unwrap();
-        while let Some(v) = hashmap.get(&new_key) {
+        while let Some(_v) = hashmap.get(&new_key) {
             tbc.remove(&old_key);
             hashmap.remove(&old_key);
             let tmp2 = *hashmap.get(&new_key).unwrap();
@@ -39,7 +44,7 @@ fn eeagcd(mut a: isize, mut b: isize) -> (isize, isize, isize, isize, isize) {
     (a, x, y, u, v)
 }
 
-fn multinv(mut a: isize, mut n: isize) -> isize {
+fn multinv(a: isize, n: isize) -> isize {
     eeagcd(a, n).1 % n
 }
 
@@ -122,26 +127,125 @@ pub trait BFAffineT<T: Copy + Ord>: Sized {
     fn get_involved_aff(&self) -> BTreeSet<T>;
 
     fn shift_keys(&mut self, by: T);
+    fn unset_linear(&mut self);
 }
 
+// Proxy Type to avoid shifting keys
+#[derive(Debug, Clone)]
+pub struct ShiftedMap<V> {
+    inner: BTreeMap<isize, V>,
+    by: Rc<RefCell<isize>>
+}
+
+impl<V> ShiftedMap<V> {
+    fn new(shift: Rc<RefCell<isize>>) -> Self {
+        Self { inner: BTreeMap::new(), by: shift }
+    }
+
+    fn get_by(&self) -> isize {
+        *self.by.borrow()
+    }
+
+    fn keys(&self) -> impl Iterator<Item=isize> + '_{
+        let a = self.get_by();
+        return self.inner.keys().map(move |x| x + a);
+    }
+
+    fn clear(&mut self){
+        self.inner.clear();
+    }
+
+    fn get(&self, key: &isize) -> Option<&V> {
+        self.inner.get(&(key + self.get_by()))
+    }
+
+    fn remove(&mut self, key: &isize) -> Option<V> {
+        self.inner.remove(&(key + self.get_by()))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn entry(&mut self, key: isize) -> btree_map::Entry<isize, V> {
+        self.inner.entry(key + &self.get_by())
+    }
+
+    fn insert(&mut self, key: isize, value: V) -> Option<V> {
+        self.inner.insert(key + &self.get_by(), value)
+    }
+}
+
+impl<'a, V> IntoIterator for &'a ShiftedMap<V> {
+    type Item = (isize, &'a V);
+    type IntoIter = impl Iterator<Item = Self::Item>;
+    fn into_iter(self) -> Self::IntoIter {
+        let a = self.get_by();
+        self.inner.iter().map(move |(x, y)| (*x + a, y))
+    }
+}
+
+impl<'a, V> IntoIterator for &'a mut ShiftedMap<V> {
+    type Item = (isize, &'a mut V);
+    type IntoIter = impl Iterator<Item = (isize, &'a mut V)>;
+    fn into_iter(self) -> Self::IntoIter {
+        let a = self.get_by();
+        self.inner.iter_mut().map(move |(x, y)| (x + &a, y))
+    }
+}
+
+impl<V> Index<&isize> for ShiftedMap<V> {
+    type Output = V;
+    fn index(&self, index: &isize) -> &Self::Output {
+        self.inner.index(&(index + &self.get_by()))
+    }
+}
+
+impl<V> Index<isize> for ShiftedMap<V> {
+    type Output = V;
+    fn index(&self, index: isize) -> &Self::Output {
+        self.inner.index(&(index + &self.get_by()))
+    }
+}
 
 // simple and naive approach to represent the arbitrary dimensional matrix
 #[derive(Debug)]
 pub struct BFAddMap { 
     // default is the zero vector
-    affine: BTreeMap<isize, w8>,
+    affine: ShiftedMap<w8>,
 
     // default is identity matrix
-    matrix: BTreeMap<isize, BTreeMap<isize, w8>>
+    matrix: ShiftedMap<ShiftedMap<w8>>,
+    shift: Rc<RefCell<isize>>
+}
+
+impl BFAddMap {
+    fn new_map<T>(&self) -> ShiftedMap<T> {
+        ShiftedMap::new(self.shift.clone())
+    }
+
+    fn transpose(&self) -> ShiftedMap<ShiftedMap<w8>> {
+    }
 }
 
 impl BFAffineT<isize> for BFAddMap {
     fn new_ident() -> Self {
-        Self { affine: BTreeMap::new(), matrix: BTreeMap::new() }
+        let shift = Rc::new(RefCell::new(0));
+        Self {
+            affine: ShiftedMap::new(shift.clone()),
+            matrix: ShiftedMap::new(shift.clone()),
+            shift
+        }
     }
 
+
+
     fn add_const(&mut self, i: isize, v: w8) {
-        self.affine.entry(i).and_modify(|mut e| *e += v).or_insert(v);
+        self.affine.entry(i).and_modify(|e| *e += v).or_insert(v);
         if self.affine[&i] == Wrapping(0) {
             self.affine.remove(&i);
         }
@@ -149,14 +253,16 @@ impl BFAffineT<isize> for BFAddMap {
 
     fn set_zero(&mut self, i:isize) {
         self.affine.remove(&i);
-        let x = self.matrix.entry(i).or_insert(BTreeMap::new());
+        let nm = self.new_map();
+        let x = self.matrix.entry(i).or_insert(nm);
         x.clear();
         x.insert(i, Wrapping(0));
     }
 
     fn add_mul_raw(&mut self, dest: isize, src: isize, v: w8) {
-        let mut m = self.matrix.entry(dest).or_insert(BTreeMap::new());
-        m.entry(src).and_modify(|mut e| *e += v).or_insert(v);
+        let nm = self.new_map();
+        let m = self.matrix.entry(dest).or_insert(nm);
+        m.entry(src).and_modify(|e| *e += v).or_insert(v);
         if (m[&src] == Wrapping(0) && dest != src) || (m[&src] == Wrapping(1) && dest == src) {
             m.remove(&src);
         }
@@ -191,46 +297,47 @@ impl BFAffineT<isize> for BFAddMap {
 
     // might cache this instead
     fn shift_keys(&mut self, by: isize) {
-        shift_hashmap(&mut self.affine, by);
-        if self.matrix.is_empty() {
-            return;
-        }
+        *self.shift.borrow_mut() += by;
+        // shift_hashmap(&mut self.affine, by);
+        // if self.matrix.is_empty() {
+        //     return;
+        // }
 
-        let mut new_multmap = BTreeMap::new();
-        let keys = self.matrix.keys().map(|x| *x).collect::<Vec<_>>();
-        for k in keys {
-            let mut tmp_map = self.matrix.remove(&k).unwrap();
-            shift_hashmap(&mut tmp_map, by);
-            new_multmap.insert(k + by, tmp_map);
-        }
-        self.matrix = new_multmap;
+        // let mut new_multmap = BTreeMap::new();
+        // let keys = self.matrix.keys().map(|x| *x).collect::<Vec<_>>();
+        // for k in keys {
+        //     let mut tmp_map = self.matrix.remove(&k).unwrap();
+        //     shift_hashmap(&mut tmp_map, by);
+        //     new_multmap.insert(k + by, tmp_map);
+        // }
+        // self.matrix = new_multmap;
     }
 
     // very inefficient, O(n^3), should be optimized in the future!
     fn matmul(&mut self, other: &Self) {
         // transposing the other matrix 
-        let mut t_other: BTreeMap<isize, BTreeMap<isize, w8>> = BTreeMap::new();
+        let mut t_other: ShiftedMap<ShiftedMap<w8>> = ShiftedMap::new(self.shift.clone());
         for (i, v) in &other.matrix {
             for (j, w) in v {
-                let m = t_other.entry(*j).or_insert(BTreeMap::new());
-                m.insert(*i, *w);
+                let m = t_other.entry(j).or_insert(ShiftedMap::new(self.shift.clone()));
+                m.insert(i, *w);
             }
         }
 
-        let mut keys: BTreeSet<isize> = BTreeSet::from_iter(self.matrix.keys().map(|x| *x));
+        let mut keys: BTreeSet<isize> = BTreeSet::from_iter(self.matrix.keys());
         keys.extend(t_other.keys());
 
-        let mut resulting_mat = BTreeMap::new();
-        let empty_mat = BTreeMap::new();
+        let mut resulting_mat = self.new_map();
+        let empty_mat = self.new_map();
         for i in &keys {
             let v = self.matrix.get(&i).unwrap_or(&empty_mat);
-            let mut row = BTreeMap::new();
+            let mut row = self.new_map();
             for j in &keys {
                 match t_other.get(&j) {
                     Some(w) => {
                         let mut val = Wrapping(0);
                         for (x, a) in v {
-                            val += a * w.get(x).map(|x| *x).unwrap_or(Wrapping(if i == j { 1 } else { 0 }));
+                            val += a * w.get(&x).map(|x| *x).unwrap_or(Wrapping(if i == j { 1 } else { 0 }));
                         }
 
                         if (i == j && val.0 != 1) || (i != j && val.0 != 0) {
@@ -249,19 +356,19 @@ impl BFAffineT<isize> for BFAddMap {
 
         }
 
-        let mut keys: BTreeSet<isize> = BTreeSet::from_iter(self.matrix.keys().map(|x| *x));
+        let mut keys: BTreeSet<isize> = BTreeSet::from_iter(self.matrix.keys());
         keys.extend(other.affine.keys());
         for i in &keys {
             let v = self.matrix.get(&i).unwrap_or(&empty_mat);
             let mut val = Wrapping(0);
             for (j, w) in &other.affine {
-                val += w * v.get(&j).map(|x| *x).unwrap_or(Wrapping(if i == j {1} else {0}));
+                val += w * v.get(&j).map(|x| *x).unwrap_or(Wrapping(if *i == j {1} else {0}));
             }
 
             if val.0 != 0 {
-                self.affine.entry(*i).and_modify(|mut e| *e += val).or_insert(val);
+                self.affine.entry(*i).and_modify(|e| *e += val).or_insert(val);
                 if self.affine[i].0 == 0 {
-                    self.affine.remove(i);
+                    self.affine.remove(&i);
                 }
             }
         }
@@ -288,17 +395,23 @@ impl BFAffineT<isize> for BFAddMap {
         }
 
         for (i, v) in &self.affine {
-            let h = BTreeMap::from([(ind, v * x)]);
-            self.matrix.insert(*i, h);
+            let mut h = self.new_map();
+            h.insert(ind, v* x);
+            dbg!(v, x);
+            self.matrix.insert(i, h);
         }
         self.affine.clear();
     }
     
-    fn get_involved_lin(&self) -> BTreeSet<T> {
-        self.affine.keys().collect()
+    fn get_involved_lin(&self) -> BTreeSet<isize> {
+        self.affine.keys().map(|x| x).collect()
     }
-    fn get_involved_aff(&self) -> BTreeSet<T> {
+    fn get_involved_aff(&self) -> BTreeSet<isize> {
         todo!()
+    }
+
+    fn unset_linear(&mut self) {
+        self.matrix = ShiftedMap::new(self.shift.clone());
     }
 }
 
@@ -382,7 +495,7 @@ pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Opt
     while index < unoptimized.len() {
         let mut prev = false;
         let l = unoptimized.len();
-        match &unoptimized[index] {
+        match &mut unoptimized[index] {
             Optree::OffsetMap(bfaddmap) if index < l - 1 => {
                 if let Some(Optree::OffsetMap(_)) = unoptimized.get(index + 1) {
                     let Optree::OffsetMap(mut el) = unoptimized.remove(index + 1) else { panic!("wrong check!") };
@@ -392,9 +505,9 @@ pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Opt
                     prev = true;
                 }
             },
-            Optree::Branch(uo, preshift, 0) if uo.len() == 1 => {
+            Optree::Branch(ref mut uo, preshift, 0) if uo.len() == 1 => {
                 let preshift_ = *preshift;
-                match &uo[0] {
+                match &mut uo[0] {
                     // a classical [-] loop or variations of it
                     Optree::OffsetMap(m) if m.is_affine_at0() => {
                         std::mem::swap(&mut unoptimized[index], &mut Optree::OffsetMap({
@@ -402,7 +515,7 @@ pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Opt
                             new_map.set_zero(preshift_);
                             new_map
                         }));
-                        {
+                        if preshift_ > 0 {
                             let mut j = index + 1;
                             while j < l && unoptimized[j].shift(preshift_) {
                                 j += 1;
@@ -413,12 +526,10 @@ pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Opt
                             index -= 1;
                         }
                     },
-                    Optree::OffsetMap(m) if m.is_affine() => {
+                    Optree::OffsetMap(ref mut m) if m.is_affine() => {
                         let a = m.get_affine(0);
-                        if a.0 & 1 == 1 {
-                            let b = {
-                                let Optree::Branch(uo, preshift, 0) = &mut unoptimized[index] else { panic!("wrong check!") };
-                                let Optree::OffsetMap(m) = &mut uo[0] else { panic!("wrong check!") };
+                        if a.0 % 2 == 1 {
+                            let mut b = {
                                 let mut b = T::new_ident();
                                 std::mem::swap(m, &mut b);
                                 let factor = multinv(256 - (a.0 as isize), 256) as u8;
@@ -427,7 +538,15 @@ pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Opt
                                 b
                             };
 
+                            b.shift_keys(preshift_);
+
                             std::mem::swap(&mut unoptimized[index], &mut Optree::OffsetMap(b));
+                            if preshift_ > 0 {
+                                let mut j = index + 1;
+                                while j < l && unoptimized[j].shift(preshift_) {
+                                    j += 1;
+                                }
+                            }
                             prev = true;
                             if index > 0 {
                                 index -= 1;
@@ -450,6 +569,9 @@ pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Opt
             index += 1;
         }
     }
+    if let Optree::OffsetMap(ref mut m) = &mut unoptimized[0] {
+        m.unset_linear();
+    }
 }
 
 #[derive(Debug)]
@@ -465,8 +587,8 @@ pub enum Opcode {
     Mult(i16, i16, w8),
 }
 
-// BrainFuck AFfine Linear Optimizing Data Structure
-pub trait BFAFLODS<T: Copy + Ord, U: BFAffineT<T>> {
+// BrainFuck Affine Linear Optimizing Data Structure
+pub trait BFAFLODS<T: Copy + Ord> : BFAffineT<T> {
     // in order to compile the affine transforms, we need to make sure, we 
     // do the least amount of unnecessary computations and caching
     //
@@ -477,13 +599,38 @@ pub trait BFAFLODS<T: Copy + Ord, U: BFAffineT<T>> {
     // we then go backwards in the topological sorting, because these elements 
     // are the ones, that only dependent on other variables, while no other variables
     // depend on them
-    fn vertices(t: &U) -> Vec<T>;
-    fn edges(t: &U) -> Vec<(T, T)>;
-    fn linearize(t: U) -> Vec<Opcode>;
+    fn new_graph_adapter(&self) -> impl Graphlike<T> + std::fmt::Debug;
+    fn linearize(&self) -> Vec<Opcode>;
 }
 
-impl BFAFLODS<isize, BFAddMap> for BFAddMap {
-    fn linearize(t: Self) -> Vec<Opcode> {
+#[derive(Clone, Debug)]
+pub struct BFAddMapGraphAdapter {
+    vertices: Vec<isize>,
+    edges: Vec<Vec<usize>>,
+    translator: BTreeMap<isize, usize>
+}
+
+impl BFAFLODS<isize> for BFAddMap {
+    fn new_graph_adapter(&self) -> impl Graphlike<isize> + std::fmt::Debug {
+        let mut keys: BTreeSet<isize> = BTreeSet::from_iter(self.matrix.keys());
+        keys.extend(self.affine.keys());
+
+        let mut vertices = Vec::new();
+        let mut translator = BTreeMap::new();
+        let mut edges = Vec::new();
+        for (index, i) in keys.iter().enumerate() {
+            vertices.push(*i);
+            translator.insert(*i, index);
+            edges.push(Vec::new());
+        }
+        for (i, j) in &self.matrix {
+            for (y, _) in j {
+                edges[translator[&i]].push(translator[&y]);
+            }
+        }
+        BFAddMapGraphAdapter { vertices, edges, translator }
+    }
+    fn linearize(&self) -> Vec<Opcode> {
         // 1. step: get strongly connected components from the hashmaps 
         // 2. step: topologically sort them 
         //
@@ -491,44 +638,10 @@ impl BFAFLODS<isize, BFAddMap> for BFAddMap {
         // that outputs the strongly connected components in reverse DAG-TS
         // order anyway:
         //
-        let mut index = 0;
-        let mut s = Vec::new(); // stack to be used
-        let mut components = Vec::new();
-        for v in Self::vertices(t) {
-            if v.index.is_none() {
-                strongconnect(v);
-            }
-        }
-        fn strongconnect(v){
-            v.index = index;
-            v.lowlink = index;
-            index += 1;
-            s.push(v);
-            v.onstack = true;
-            for (v, w) in Self::edges(t) {
-                match v.index {
-                    None => {
-                        strongconnect(w);
-                        v.lowlink = min(v.lowlink, w.lowlink);
-                    }
-                    Some(x) if w.onstack => {
-                        v.lowlink = min(v.lowlink, w.index);
-                    }
-                }
-            }
 
-            if Some(v.lowlink) == v.index {
-                let mut w = stack.pop();
-                w.onstack = false;
-                let mut current_component = vec![w];
-                while w != v {
-                    w = stack.pop();
-                    w.onstack = false;
-                    current_component.push(w);
-                }
-            }
-        }
 
+        let out = self.new_graph_adapter();
+        dbg!(out);
         //
         // 3. convert into opcode
         //
@@ -536,9 +649,118 @@ impl BFAFLODS<isize, BFAddMap> for BFAddMap {
     }
 }
 
-pub fn linearize<T: BFAffineT<isize>>(tree: Vec<Optree<T>>) -> Vec<Opcode> {
-    todo!()
+
+
+struct Graph<V> {
+    vertices: Vec<V>,
+    edges: Vec<Vec<usize>>
 }
+
+pub trait Graphlike<V>: Sized {
+    fn get_num_verts(&self) -> usize;
+    fn edges_iter(&self, i: usize) -> impl Iterator<Item = &usize>;
+
+    fn tarjan(&self) -> Vec<Vec<usize>> {
+        let mut index = 0;
+        // the stack
+        let mut s: Vec<usize> = Vec::new();
+        // storing the tarjan states of index, lowlink and onStack
+        let mut gstate: Vec<Option<TarjanState>> = Vec::new();
+        // vector that stores the strongly connected components
+        let mut connected: Vec<Vec<usize>> = Vec::new();
+        gstate.resize(self.get_num_verts(), None);
+
+        for vindex in 0..self.get_num_verts() {
+            if let None = gstate[vindex] {
+                strongconnect(self, vindex, &mut s, &mut gstate, &mut index, &mut connected);
+            }
+        }
+        return connected;
+    }
+}
+
+impl<V> Graphlike<V> for Graph<V> {
+    fn get_num_verts(&self) -> usize {
+        self.vertices.len()
+    }
+
+    fn edges_iter(&self, i: usize) -> impl Iterator<Item = &usize> {
+        self.edges[i].iter()
+    }
+}
+
+impl Graphlike<isize> for BFAddMapGraphAdapter {
+    fn get_num_verts(&self) -> usize {
+        self.vertices.len()
+    }
+
+    fn edges_iter(&self, i: usize) -> impl Iterator<Item = &usize> {
+        self.edges[i].iter()
+    }
+}
+
+#[derive(Clone)]
+struct TarjanState {
+    index: usize,
+    lowlink: usize,
+    onstack: bool
+}
+
+
+
+
+fn strongconnect<V, G: Graphlike<V>>(
+    g: &G,
+    vindex: usize,
+    s: &mut Vec<usize>,
+    gstate: &mut Vec<Option<TarjanState>>,
+    index: &mut usize,
+    connected: &mut Vec<Vec<usize>>
+) -> Result<(), String> {
+    gstate[vindex] = Some(TarjanState { index: *index, lowlink: *index, onstack: true });
+    *index += 1;
+    s.push(vindex);
+
+    for &w in g.edges_iter(vindex) {
+        match &gstate[w] {
+            None => {
+                let _ = strongconnect(g, w, s, gstate, index, connected);
+                let l = gstate[w].as_ref().unwrap().lowlink;
+                let v = gstate[vindex].as_mut().unwrap();
+                v.lowlink = v.lowlink.min(l);
+            },
+            Some(x) if x.onstack => {
+                let l = x.lowlink;
+                let v = gstate[vindex].as_mut().unwrap();
+                v.lowlink = v.lowlink.min(l);
+            }
+            Some(_) => {}
+        }
+    }
+
+    let v = gstate[vindex]
+        .as_ref()
+        .ok_or(format!("ERROR: State of vertex {} got undefined (somehow)", vindex))?;
+    if v.lowlink == v.index {
+        let mut component = Vec::new();
+        loop {
+            let w = s
+                .pop()
+                .ok_or(format!("ERROR: Stack is empty, even though vertex {} is registered", vindex))?;
+            match &mut gstate[w] {
+                Some(x) => x.onstack = false,
+                None => {}
+            }
+            component.push(w);
+            if w == vindex { break; }
+        }
+        connected.push(component);
+    }
+
+    Ok(())
+}
+
+
 
 pub fn main() {
     let args: Vec<String> = env::args().collect();
@@ -553,6 +775,16 @@ pub fn main() {
     let t2: usize = tree.iter().map(|x| x.size()).sum();
     dbg!(&tree);
     dbg!(t1, t2);
+    if let Optree::OffsetMap(m) = &tree[0] {
+        m.linearize();
+    }
 }
 
-
+#[cfg(test)]
+mod test {
+    use super::*;
+    fn some_test() {
+        let g = Graph {vertices: vec![1, 2, 3], edges: vec![vec![1], vec![0], vec![]]};
+        println!("Hello, world! {:?}", g.tarjan());
+    }
+}

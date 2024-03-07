@@ -1,0 +1,1 @@
+Map<std::collections::btree_map::IterMut<'_, isize, Wrapping<u8>>, fn((isize, &mut Wrapping<u8>)) -> (isize, &mut Wrapping<u8>)>
