@@ -1,11 +1,10 @@
-extern crate test;
 use std::{collections::{BTreeMap, BTreeSet}, hash::Hash, num::Wrapping};
 
-use crate::utils::{multinv, swap_entries, w8, w8div, w8inv, BTreeZipAnd, BTreeZipOr, One, Zero};
+use crate::utils::{multinv, shift_bmap, swap_entries, w8, w8div, w8inv, BTreeZipAnd, BTreeZipOr, One, Zero};
 
 #[derive(Debug, PartialEq)]
 pub struct Permutation<K> {
-    inner: BTreeMap<K, K>
+    pub inner: BTreeMap<K, K>
 }
 
 impl<K: Copy + Eq + Ord + Hash> Permutation<K> {
@@ -23,7 +22,19 @@ impl<K: Copy + Eq + Ord + Hash> Permutation<K> {
             self.inner.remove(&row2);
         }
     }
-    
+
+    pub fn reverse(&self) -> Permutation<K> {
+        let mut new_inner = BTreeMap::new();
+        for (k, v) in &self.inner {
+            new_inner.insert(*v, *k);
+        }
+        Permutation { inner: new_inner }
+    }
+
+    pub fn get(&self, k: &K) -> K {
+        *self.inner.get(k).unwrap_or(k)
+    }
+
     pub fn apply<V>(&self, other: &mut BTreeMap<K, V>) {
         let mut swapped = BTreeMap::new();
         for &k in self.inner.keys() {
@@ -34,7 +45,7 @@ impl<K: Copy + Eq + Ord + Hash> Permutation<K> {
             swapped.insert(k, true);
             while !swapped[&tmp_v] {
                 swapped.insert(tmp_v, true);
-                swap_entries(other, &k, &tmp_v);
+                swap_entries(other, &tmp_v, &k);
                 tmp_v = self.inner[&tmp_v];
             }
         }
@@ -60,24 +71,33 @@ impl Permutation<isize> {
     }
 }
 
+pub fn optimize_vec(vec: &mut BTreeMap<isize, w8>) -> bool {
+    let mut changed = false;
+    vec.retain(|&_, v| {
+        let is_default = *v == w8::ZERO;
+        changed = changed || is_default;
+        !is_default // retain filters out false values, therefore we have to negate this
+    });
+    changed
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Matrix {
-    inner: BTreeMap<isize, BTreeMap<isize, w8>>
+    pub inner: BTreeMap<isize, BTreeMap<isize, w8>>
 }
 
 impl Matrix {
-    fn new() -> Matrix {
+    pub fn new() -> Matrix {
         Matrix {
             inner : BTreeMap::new()
         }
     }
 
-    fn rows(&self) -> impl Iterator<Item=&isize> {
+    pub fn rows(&self) -> impl Iterator<Item=&isize> {
         self.inner.keys()
     }
 
-    fn columns(&self) -> BTreeSet<isize> {
+    pub fn columns(&self) -> BTreeSet<isize> {
         let mut accum = BTreeSet::new();
         for row in self.inner.values() {
             for q in row.keys() {
@@ -87,19 +107,19 @@ impl Matrix {
         accum
     }
 
-    fn get_raw(&self, row: isize, column: isize) -> Option<w8> {
+    pub fn get_raw(&self, row: isize, column: isize) -> Option<w8> {
         self.inner.get(&row).and_then(|x| x.get(&column).copied())
     }
 
-    fn get_row(row: &BTreeMap<isize, w8>, row_index: isize, column_index: isize) -> w8 {
+    pub fn get_row(row: &BTreeMap<isize, w8>, row_index: isize, column_index: isize) -> w8 {
         row.get(&column_index).copied().unwrap_or(if column_index == row_index {w8::ONE} else {w8::ZERO})
     }
 
-    fn get(&self, row: isize, column: isize) -> w8 {
+    pub fn get(&self, row: isize, column: isize) -> w8 {
         self.get_raw(row, column).unwrap_or(if row == column { w8::ONE } else { w8::ZERO })
     }
 
-    fn set(&mut self, row: isize, column: isize, value: w8) -> Option<w8> {
+    pub fn set(&mut self, row: isize, column: isize, value: w8) -> Option<w8> {
         let is_default = (row == column && value == w8::ONE) || (row != column && value == w8::ZERO);
         // if it already has that value by default, remove the entry
         if is_default {
@@ -121,17 +141,20 @@ impl Matrix {
         entry.insert(column, value)
     }
 
-    fn optimize_all(&mut self) -> bool {
+    pub fn optimize_all(&mut self) -> bool {
         let mut changed = false;
-        let row_vec = self.rows().copied().collect::<Vec<_>>();
-        for &k in row_vec.iter() {
-            changed = self.optimize_row(k) || changed; // optimize_row has side effects and we
-                                                       // don't want to short circuit that
+        for (&k, row) in self.inner.iter_mut() {
+            row.retain(|&j, v| {
+                let is_default = *v == if k == j { w8::ONE } else { w8::ZERO };
+                changed = changed || is_default;
+                !is_default // retain filters out false values, therefore we have to negate this
+            });
         }
+        self.inner.retain(|_, x| !x.is_empty());
         changed
     }
 
-    fn optimize_row(&mut self, row_index: isize) -> bool {
+    pub fn optimize_row(&mut self, row_index: isize) -> bool {
         let mut changed = false;
         if let Some(row) = self.inner.get_mut(&row_index) {
             row.retain(|&j, v| {
@@ -147,7 +170,9 @@ impl Matrix {
         changed
     }
 
-    fn swap_rows(&mut self, row1: isize, row2: isize) {
+    pub fn swap_rows(&mut self, row1: isize, row2: isize) {
+        self.inner.entry(row1).or_insert(BTreeMap::from([(row1, w8::ONE)]));
+        self.inner.entry(row2).or_insert(BTreeMap::from([(row2, w8::ONE)]));
         swap_entries(&mut self.inner, &row1, &row2);
         // correct out identity by default
         if let Some(row2_inner) = self.inner.get_mut(&row2) {
@@ -168,7 +193,14 @@ impl Matrix {
         self.optimize_row(row1);
     }
 
-    fn mul_row(&mut self, row_index: isize, val: w8) {
+    pub fn zero_row(&mut self, row_index: isize) {
+        let x = self.inner.entry(row_index).or_insert(BTreeMap::new());
+        x.clear();
+        x.insert(row_index, w8::ZERO);
+
+    }
+
+    pub fn mul_row(&mut self, row_index: isize, val: w8) {
         if let Some(row) = self.inner.get_mut(&row_index) {
             for v in row.values_mut() {
                 *v *= val;
@@ -182,7 +214,7 @@ impl Matrix {
     }
 
 
-    fn add_mul_row(&mut self, from: isize, dest: isize, factor: w8) {
+    pub fn add_mul_row(&mut self, from: isize, dest: isize, factor: w8) {
         if self.inner.contains_key(&from) {
             let mut dest_row = self.inner.remove(&dest).unwrap_or_default();
             // default identity is multiplied by factor
@@ -209,7 +241,49 @@ impl Matrix {
         }
     }
 
-    fn first_row_with_oddest_entry(&self, column: isize, starting_at: isize) -> Option<(isize, w8)> {
+    // This is a helper function to score which pivoting point to use. The more rows are linear
+    // combination of a row, the more it's worth it to pivot that row.
+    // It's already helpful if 
+    //returns how many entries of row2 are a linear to row1, therefore row1 has to be 
+    //
+    // If there is just one entry, it counts as 0
+    pub fn num_lin(&self, row1: isize, row2: isize) -> (usize, w8) {
+        let mut lin_factor = None;
+        let mut previous_k = isize::MIN;
+        let mut counter = 0;
+        let Some(row_entry1) = self.inner.get(&row1) else { return (0, w8::ZERO); };
+        let Some(row_entry2) = self.inner.get(&row2) else { return (0, w8::ZERO); };
+        for (k, (v1, v2)) in BTreeZipOr::new(row_entry1, row_entry2) {
+            if (previous_k < row1 && row1 < *k) || (previous_k < row2 && row2 < *k) {
+                // i.e. we skipped a default 1, so the other entry is 0
+                // 0 * anything can't be 1 and only 1 * 0 = 0 mod 256 => lin factor has to be 0 => 
+                // would return 0 anyways, so that would be invalid
+                return (counter, lin_factor.unwrap_or(w8::ZERO));
+            }
+            let unwrapped_v1 = v1.copied().unwrap_or(if k == &row1 {w8::ONE} else {w8::ZERO});
+            let unwrapped_v2 = v2.copied().unwrap_or(if k == &row2 {w8::ONE} else {w8::ZERO});
+            match lin_factor {
+                None => {
+                    lin_factor = Some(w8div(unwrapped_v2, unwrapped_v1));
+                    if lin_factor == Some(w8::ZERO) {
+                        // if the other row starts with a 0, it's not helpful for comparison
+                        return (0, w8::ZERO);
+                    }
+                },
+                Some(lin) => {
+                    if lin * unwrapped_v1 != unwrapped_v2 {
+                        return (counter, lin);
+                    }
+                    counter += 1;
+                }
+            }
+            previous_k = *k;
+
+        }
+        (counter, lin_factor.unwrap_or(w8::ZERO))
+    }
+
+    pub fn first_row_with_oddest_entry(&self, column: isize, starting_at: isize) -> Option<(isize, w8)> {
         let default_identity = Some((column, w8::ONE));
         if self.inner.is_empty() { // default is the identity
             return default_identity;
@@ -217,10 +291,12 @@ impl Matrix {
         let (&first_key, _) = self.inner.first_key_value().unwrap();
         let (&last_key, _) = self.inner.last_key_value().unwrap();
         // if column lies outside, default to identity
-        if column < first_key && column >= starting_at {
+        if (column < first_key && column >= starting_at) || starting_at > last_key  {
             return default_identity;
         }
         let mut candidate: Option<(isize, w8)> = None;
+        let mut minimum_trailing_0 = usize::MAX;
+
         let (range, can_identity) = if !self.inner.contains_key(&column) && column >= starting_at {
             // if identity is a possibility, we don't need to look until there
             (self.inner.range(starting_at..column), true)
@@ -250,7 +326,7 @@ impl Matrix {
         }
     }
 
-    fn check_plu_equiv(mat: &Matrix, p: &Permutation<isize>, l: &Matrix, u: &Matrix) -> bool {
+    pub fn check_plu_equiv(mat: &Matrix, p: &Permutation<isize>, l: &Matrix, u: &Matrix) -> bool {
         let mut mat_clone = mat.clone();
         mat_clone.optimize_all();
         let mut lu = l.matmul(u);
@@ -263,7 +339,12 @@ impl Matrix {
         result
     }
 
-    fn plu(mut self) -> (Permutation<isize>, Matrix, Matrix) {
+    // computes the PLU decomposition and returns a permutation, a lower triangular matrix and an
+    // upper triangular matrix
+    //
+    // runs in O(n^3 log n) as there are O(n^2) add_mul_row calls, each taking O(n log n) time
+    // could be made O(n^3)
+    pub fn plu(mut self) -> (Permutation<isize>, Matrix, Matrix) {
         let mut perm = Permutation { inner: BTreeMap::new() };
         let mut left = Matrix { inner: BTreeMap::new() };
 
@@ -295,8 +376,6 @@ impl Matrix {
             // we're therefore looking for the row with the lowest trailing zeros in a bit
             // representation!
 
-
-
             // check in which row this column exists
             let Some((row, row_val)) = self.first_row_with_oddest_entry(index, index) else {continue;};
 
@@ -324,11 +403,49 @@ impl Matrix {
         // the right matrix. e.g. a row could be a multiple of another row
     }
 
-    fn U_op(&self) -> Vec<MatOpCode> {
+    // converts an upper right triangle matrix to a list of 
+    // in place op codes 
+    //
+    // when we start with 
+    //
+    // * * * * *    a
+    //   * * * *    b
+    //     * * *    c
+    //       * *    d
+    //         *    e 
+    //
+    // so we can replace a first, as nothing else depends on a
+    pub fn u_op(&self) -> Vec<MatOpCode> {
         let mut result = Vec::new();
         for (&k, row) in &self.inner {
             for (&column, &val) in row {
                 if (k == column) {
+                    result.push(MatOpCode::Mul(k, val));
+                } else {
+                    result.push(MatOpCode::Add(k, column, val));
+                }
+            }
+        }
+        result
+    }
+
+    // converts an lower left triangle matrix to a list of 
+    // in place op codes 
+    //
+    // when we start with 
+    //
+    // *            a
+    // * *          b
+    // * * *        c
+    // * * * *      d
+    // * * * * *    e 
+    //
+    // so we can replace e first, as nothing else depends on e
+    pub fn l_op(&self) -> Vec<MatOpCode> {
+        let mut result = Vec::new();
+        for (&k, row) in self.inner.iter().rev() {
+            for (&column, &val) in row.iter().rev() {
+                if k == column {
                     result.push(MatOpCode::Mul(k, val));
                     continue;
                 }
@@ -338,21 +455,15 @@ impl Matrix {
         result
     }
 
-    fn L_op(&self, p: &Permutation<isize>) -> Vec<MatOpCode> {
-        let mut result = Vec::new();
-        for (&k, row) in &self.inner {
-            for (&column, &val) in row {
-                if (k == column) {
-                    result.push(MatOpCode::Mul(k, val));
-                    continue;
-                }
-                result.push(MatOpCode::Add(k, column, val));
-            }
-        }
-        result
+    pub fn to_opcode(self) -> (Permutation<isize>, Vec<MatOpCode>) {
+        let (p, l, u) = self.plu();
+        let mut u_op = u.u_op();
+        let l_op = l.l_op();
+        u_op.extend(l_op.iter().cloned());
+        (p, u_op)
     }
 
-    fn transpose(&self) -> Matrix {
+    pub fn transpose(&self) -> Matrix {
         let mut transposed = Matrix::new();
         for (&row_index, row) in &self.inner {
             for (&column_index, &val) in row {
@@ -362,7 +473,7 @@ impl Matrix {
         transposed
     }
 
-    fn vecmul(&self, other: &BTreeMap<isize, w8>) -> BTreeMap<isize, w8> {
+    pub fn vecmul(&self, other: &BTreeMap<isize, w8>) -> BTreeMap<isize, w8> {
         let mut result = BTreeMap::new();
         for (k, en) in other.iter() {
             if self.inner.contains_key(k) {
@@ -380,7 +491,7 @@ impl Matrix {
         result
     }
 
-    fn row_vec_mul(row_index: isize, row: &BTreeMap<isize, w8>, column: &BTreeMap<isize, w8>) -> w8 {
+    pub fn row_vec_mul(row_index: isize, row: &BTreeMap<isize, w8>, column: &BTreeMap<isize, w8>) -> w8 {
         let mut result = w8::ZERO;
         // if row doesn't contain its index: 1 default entry
         if !row.contains_key(&row_index) && column.contains_key(&row_index) {
@@ -392,7 +503,7 @@ impl Matrix {
         result
     }
 
-    fn row_column_mul(row_index: isize, row: &BTreeMap<isize, w8>, column_index: isize, column: &BTreeMap<isize, w8>) -> w8 {
+    pub fn row_column_mul(row_index: isize, row: &BTreeMap<isize, w8>, column_index: isize, column: &BTreeMap<isize, w8>) -> w8 {
         let mut result = w8::ZERO;
         // if row doesn't contain its index: 1 default entry
         // if column doesn't contain its index: same thing
@@ -409,7 +520,9 @@ impl Matrix {
     }
 
     // note: that, as in mathematical notation, the right matrix get's applied first
-    fn matmul(&self, other: &Matrix) -> Matrix {
+    //
+    // runs in O(n^3)
+    pub fn matmul(&self, other: &Matrix) -> Matrix {
         let mut new_inner = Matrix::new();
 
         let other_t = other.transpose();
@@ -458,8 +571,13 @@ impl Matrix {
         new_inner
     }
 
-    fn and_then(&self, other: &Matrix) -> Matrix {
+    pub fn and_then(&self, other: &Matrix) -> Matrix {
         other.matmul(self)
+    }
+
+    pub fn shift_key(&mut self, by: isize) {
+        self.inner.iter_mut().for_each(|(_, r)| shift_bmap(r, by) );
+        shift_bmap(&mut self.inner, by);
     }
 }
 
@@ -480,17 +598,81 @@ impl From<Vec<Vec<u8>>> for Matrix {
     }
 }
 
-enum MatOpCode {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MatOpCode {
     Add(isize, isize, w8),
     Mul(isize, w8)
 }
 
+pub fn apply_mat_opcode(opcodes: &Vec<MatOpCode>, vector: &mut BTreeMap<isize, w8>) {
+    for opcode in opcodes {
+        match opcode {
+            MatOpCode::Mul(i, v) => {vector.entry(*i).and_modify(|x| *x *= v);}
+            MatOpCode::Add(to, from, v) => {
+                let a = vector.get(from).copied().unwrap_or(w8::ZERO);
+                *vector.entry(*to).or_insert(w8::ZERO) += a * v;
+            }
+        }
+    }
+}
+
+pub fn addi_vec(a: &mut BTreeMap<isize, w8>, b: &BTreeMap<isize, w8>) {
+    for (k, v) in b.iter() {
+        a.entry(*k).and_modify(|e| *e += v).or_insert(*v);
+    }
+    a.retain(|&_, v| *v != w8::ZERO);
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rand::{distr::{StandardUniform, Uniform}, prelude::*};
-    use test::Bencher;
+
+    #[test]
+    fn test_mat_opcode(){
+        let mut rng = StdRng::seed_from_u64(42);
+        for i in 0..100 {
+            println!("Iter: {i}");
+            // let width = rng.next_u32() % 100; // I know modulo bias is a thing, but testing this is such a low
+                                  // severity usecase, that I'll just modulo it
+            // let height = rng.next_u32() % 100;
+            let width = 50;
+            let height = 50;
+            let vec = gen_random_vec(height as usize, &mut rng);
+            let mat = gen_random_matrix(width as usize, height as usize, &mut rng);
+
+            let (p, mut l, mut u) = mat.clone().plu();
+            l.optimize_all();
+            u.optimize_all();
+
+            let l_op = l.l_op();
+            let u_op = u.u_op();
+            let mut all_op = u_op.clone();
+            all_op.append(&mut l_op.clone());
+
+            let mut vec_lop = vec.clone();
+            let mut vec_uop = vec.clone();
+            let mut vec_allop = vec.clone();
+            apply_mat_opcode(&l_op, &mut vec_lop);
+            apply_mat_opcode(&u_op, &mut vec_uop);
+            apply_mat_opcode(&all_op, &mut vec_allop);
+            p.apply(&mut vec_allop);
+            optimize_vec(&mut vec_lop);
+            optimize_vec(&mut vec_uop);
+            optimize_vec(&mut vec_allop);
+
+            let mut vec2 = l.vecmul(&vec);
+            let mut vec3 = u.vecmul(&vec);
+            let mut vec4 = mat.vecmul(&vec);
+            optimize_vec(&mut vec2);
+            optimize_vec(&mut vec3);
+            optimize_vec(&mut vec4);
+
+            assert_eq!(vec2, vec_lop);
+            assert_eq!(vec3, vec_uop);
+            assert_eq!(vec4, vec_allop);
+        }
+    }
 
 
     #[test]
@@ -507,6 +689,15 @@ mod tests {
         assert_eq!(BTreeMap::from([(3, Wrapping(2) * test_vec1[&1] + Wrapping(4) * test_vec1[&3])]), test_matrix.vecmul(&test_vec1 ));
     }
 
+    fn gen_random_vec<T: RngCore>(height: usize, rng: &mut T) -> BTreeMap<isize, w8> {
+        let range = StandardUniform;
+        let mut result = BTreeMap::new();
+        for (index, i) in rng.sample_iter(&range).take(height).enumerate() {
+            result.insert(index as isize, Wrapping(i));
+        }
+        result
+    }
+
     fn gen_random_matrix<T: RngCore>(width: usize, height: usize, rng: &mut T) -> Matrix {
         let range = StandardUniform;
         let mut mat = Vec::new();
@@ -517,7 +708,36 @@ mod tests {
         Matrix::from(mat)
     }
 
+    #[test]
+    fn test_transpose() {
+        let mut rng = StdRng::seed_from_u64(42);
+        use std::time::Instant;
+        let mut times = Vec::new();
+        for i in 0..100 {
+            println!("Iter: {i}");
+            // let width = rng.next_u32() % 100; // I know modulo bias is a thing, but testing this is such a low
+                                  // severity usecase, that I'll just modulo it
+            // let height = rng.next_u32() % 100;
+            let width = 100;
+            let height = 100;
+            let mut mat = gen_random_matrix(width as usize, height as usize, &mut rng);
 
+            println!("Generated: {i}");
+            let now = Instant::now();
+            let transposed = mat.transpose();
+            let mut dtransposed = transposed.transpose();
+            let elapsed = now.elapsed();
+            times.push(elapsed);
+            println!("Double transposed: {i}");
+
+            dtransposed.optimize_all();
+            mat.optimize_all();
+            assert_eq!(dtransposed, mat);
+        }
+        let total: u128 = times.iter().map(|x| x.as_micros()).sum();
+        println!("max time {:?}", times.iter().max());
+        println!("avg time {:?}", total as f32 / 100. / 1000.);
+    }
 
     #[test]
     fn test_lu_example() {
@@ -562,16 +782,17 @@ mod tests {
 
             println!("Generated: {i}");
             let now = Instant::now();
-            let (p, l, mut u) = mat.clone().plu();
+            let (p, mut l, mut u) = mat.clone().plu();
             let elapsed = now.elapsed();
             times.push(elapsed);
-            println!("PLUd: {i}");
+            // p.apply_matrix(&mut l); // associativity ftw
 
             u.optimize_all();
             let mut lu = l.matmul(&u);
             p.apply_matrix(&mut lu);
             lu.optimize_all();
             mat.optimize_all();
+            // p.reverse().apply_matrix(&mut mat);
             assert_eq!(lu, mat);
         }
         let total: u128 = times.iter().map(|x| x.as_micros()).sum();
@@ -579,7 +800,32 @@ mod tests {
         println!("avg time {:?}", total as f32 / 100. / 1000.);
     }
 
-
+    #[test]
+    fn test_num_lin(){
+        let mut m1 = Matrix::from(vec![
+            vec![1, 2, 3, 4],
+            vec![1, 2, 3, 4], // identical case -> 3
+            vec![2, 4, 6, 8], // with a multiple -> 3
+            vec![2, 4, 6, 9], // partially a multiple of the first row -> 2
+            vec![0, 4, 6, 9], // starts with 0 -> 0
+        ]);
+        m1.optimize_all();
+        assert_eq!(m1.num_lin(0, 1), (3, w8::ONE));
+        assert_eq!(m1.num_lin(0, 2), (3, Wrapping(2)));
+        assert_eq!(m1.num_lin(0, 3), (2, Wrapping(2)));
+        assert_eq!(m1.num_lin(0, 4), (0, Wrapping(0)));
+        let mut m2 = Matrix::from(vec![
+            vec![],
+            vec![], // identical case -> 3
+            vec![], // with a multiple -> 3
+            vec![0, 0, 2], // partially a multiple of the first row -> 2
+            vec![0, 4, 6, 9], // starts with 0 -> 0
+        ]);
+        m2.optimize_row(3);
+        assert_eq!(m2.num_lin(2, 3), (0, Wrapping(2)));
+        m2.optimize_all();
+        assert_eq!(m2.num_lin(2, 3), (0, Wrapping(0)));
+    }
 }
 
 

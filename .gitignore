@@ -1,3 +1,8 @@
 # brainfuck test files
 *.bf
 comp
+
+
+# Added by cargo
+
+/target
