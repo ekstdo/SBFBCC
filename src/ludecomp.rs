@@ -243,10 +243,13 @@ impl Matrix {
 
     // This is a helper function to score which pivoting point to use. The more rows are linear
     // combination of a row, the more it's worth it to pivot that row.
-    // It's already helpful if 
-    //returns how many entries of row2 are a linear to row1, therefore row1 has to be 
     //
-    // If there is just one entry, it counts as 0
+    // pivoting requires 1 additional permutation at most, so 2 read and 2 write instructions,
+    // while avoiding a linear combination saves us 1 read, 1 write and 1 multiplication
+    // instruction => if total lin comb saved > 2, it's worth it
+    //
+    //
+    // this function counts how many of the first entries of a row in row2 are a factor apart from row1
     pub fn num_lin(&self, row1: isize, row2: isize) -> (usize, w8) {
         let mut lin_factor = None;
         let mut previous_k = isize::MIN;
@@ -283,6 +286,15 @@ impl Matrix {
         (counter, lin_factor.unwrap_or(w8::ZERO))
     }
 
+    pub fn total_num_lin(&self, row: isize, starting_at: isize) -> usize {
+        let mut counter = 0;
+        for (k, _) in self.inner.range(starting_at..) {
+            counter += self.num_lin(row , *k).0;
+        }
+        counter
+    }
+
+
     pub fn first_row_with_oddest_entry(&self, column: isize, starting_at: isize) -> Option<(isize, w8)> {
         let default_identity = Some((column, w8::ONE));
         if self.inner.is_empty() { // default is the identity
@@ -294,36 +306,82 @@ impl Matrix {
         if (column < first_key && column >= starting_at) || starting_at > last_key  {
             return default_identity;
         }
-        let mut candidate: Option<(isize, w8)> = None;
-        let mut minimum_trailing_0 = usize::MAX;
+        // let mut candidate: Option<(isize, w8)> = None;
+        let mut candidates: Vec<(isize, w8)> = Vec::new();
+        let mut minimum_trailing_0 = u32::MAX;
 
-        let (range, can_identity) = if !self.inner.contains_key(&column) && column >= starting_at {
-            // if identity is a possibility, we don't need to look until there
-            (self.inner.range(starting_at..column), true)
-        } else { (self.inner.range(starting_at..), false) };
-        for (&row_index, row) in range {
+        if !self.inner.contains_key(&column) && column >= starting_at {
+            minimum_trailing_0 = 0;
+            candidates.push((column, w8::ONE)); // Identity is a possibility
+        }
+        for (&row_index, row) in self.inner.range(starting_at..) {
             if let Some(&val) =  row.get(&column) {
                 if val == w8::ZERO {
                     continue;
                 }
-                if val.0 % 2 == 1 { // odd / has no trailing zeros
-                    return Some((row_index, val));
-                } 
-                if candidate.map_or(true, |(_, candidate_val)| candidate_val.0.trailing_zeros() > val.0.trailing_zeros()) {
-                    candidate = Some((row_index, val));
+
+                let val_t0 = val.0.trailing_zeros();
+
+                if val_t0 < minimum_trailing_0 {
+                    candidates = vec![(row_index, val)];
+                    minimum_trailing_0 = val_t0;
+                } else if val_t0 == minimum_trailing_0 {
+                    candidates.push((row_index, val));
                 }
             } else if row_index == column { // identity entry by default
                 return default_identity;
             }
         }
-        if can_identity {
-            default_identity
-        } else if candidate.is_some() {
-            candidate
-        } else { // this means, the row exists, but contains a 0 entry at the identity
-                 // diagonal
-            None
+        candidates.get(0).cloned()
+    }
+
+    pub fn first_row_with_oddest_entry_opt(&self, column: isize, starting_at: isize) -> Option<(isize, w8)> {
+        let default_identity = Some((column, w8::ONE));
+        if self.inner.is_empty() { // default is the identity
+            return default_identity;
         }
+        let (&first_key, _) = self.inner.first_key_value().unwrap();
+        let (&last_key, _) = self.inner.last_key_value().unwrap();
+        // if column lies outside, default to identity
+        if (column < first_key && column >= starting_at) || starting_at > last_key  {
+            return default_identity;
+        }
+        // let mut candidate: Option<(isize, w8)> = None;
+        let mut candidates: Vec<(isize, w8)> = Vec::new();
+        let mut minimum_trailing_0 = u32::MAX;
+
+        if !self.inner.contains_key(&column) && column >= starting_at {
+            minimum_trailing_0 = 0;
+            candidates.push((column, w8::ONE)); // Identity is a possibility
+        }
+        for (&row_index, row) in self.inner.range(starting_at..) {
+            if let Some(&val) =  row.get(&column) {
+                if val == w8::ZERO {
+                    continue;
+                }
+
+                let val_t0 = val.0.trailing_zeros();
+
+                if val_t0 < minimum_trailing_0 {
+                    candidates = vec![(row_index, val)];
+                    minimum_trailing_0 = val_t0;
+                } else if val_t0 == minimum_trailing_0 {
+                    candidates.push((row_index, val));
+                }
+            } else if row_index == column { // identity entry by default
+                return default_identity;
+            }
+        }
+        let mut max_total_lin_comb = 0;
+        let mut max_candidate = candidates.get(0).cloned();
+        for i in &candidates {
+            let total_lin_comb = self.total_num_lin(i.0, starting_at);
+            if total_lin_comb > 3 && total_lin_comb > max_total_lin_comb {
+                max_total_lin_comb = total_lin_comb;
+                max_candidate = Some(i.clone());
+            }
+        }
+        max_candidate
     }
 
     pub fn check_plu_equiv(mat: &Matrix, p: &Permutation<isize>, l: &Matrix, u: &Matrix) -> bool {
@@ -377,7 +435,7 @@ impl Matrix {
             // representation!
 
             // check in which row this column exists
-            let Some((row, row_val)) = self.first_row_with_oddest_entry(index, index) else {continue;};
+            let Some((row, row_val)) = self.first_row_with_oddest_entry_opt(index, index) else {continue;};
 
             if row != index {
                 self.swap_rows(row, index); // we swap the rows for U

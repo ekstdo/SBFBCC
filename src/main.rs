@@ -8,12 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::num::Wrapping;
 use std::cmp::Ord;
+use std::path::Path;
 mod ludecomp;
 mod utils;
 use ludecomp::{addi_vec, Matrix};
 
 use crate::utils::{shift_bmap, multinv, w8, Zero, One};
-mod simulate;
 
 // while thinking about a useful representation of a lot of 
 // brainfuck instructions, we may come to the conclusion of 
@@ -248,7 +248,14 @@ impl BFAffineT<isize> for BFAddMap {
     fn to_opcode(self) -> Vec<Opcode> {
         let (perm, mat_opcode) = self.matrix.to_opcode();
         let mut out_opcode = mat_opcode.into_iter().map(|x| match x {
-            ludecomp::MatOpCode::Add(to, from, val) => Opcode::AddMul(val, (from - to) as i16, to as i32),
+            ludecomp::MatOpCode::Add(to, from, val) =>
+            if val == w8::ONE {
+                Opcode::AddCell((from - to) as i16, to as i32)
+            } else if val == Wrapping(255) {
+                Opcode::SubCell((from - to) as i16, to as i32)
+            } else {
+                Opcode::AddMul(val, (from - to) as i16, to as i32)
+            },
             ludecomp::MatOpCode::Mul(to, val) => 
                 if val == w8::ZERO {
                     Opcode::SetConst(w8::ZERO, to as i32)
@@ -257,6 +264,20 @@ impl BFAffineT<isize> for BFAddMap {
                 }
             
         }).collect::<Vec<_>>();
+
+        let rperm = perm.reverse();
+        let mut affine = self.affine;
+        rperm.apply(&mut affine);
+        for (k, v) in affine {
+            let pos = out_opcode.iter().position(|x| *x == Opcode::SetConst(w8::ZERO, k as i32));
+            match pos {
+                Some(pos) => {
+                    let mut swapping_op = Opcode::SetConst(v, k as i32);
+                    std::mem::swap(&mut out_opcode[pos], &mut swapping_op);
+                },
+                None => out_opcode.push(Opcode::AddConst(v, k as i32))
+            }
+        }
         let mut selected = BTreeSet::new();
         for (k, mut v) in &perm.inner {
             out_opcode.push(Opcode::Load(*k as i32));
@@ -266,9 +287,7 @@ impl BFAffineT<isize> for BFAddMap {
                 v = perm.inner.get(v).unwrap();
             }
         }
-        for (k, v) in self.affine {
-            out_opcode.push(Opcode::AddConst(v, k as i32));
-        }
+
         out_opcode
     }
 }
@@ -280,6 +299,61 @@ pub enum Optree<T: BFAffineT<isize>> {
     Input(isize),
     Output(isize),
     DebugBreakpoint,
+}
+
+fn gen_ccode_op<T: BFAffineT<isize> + Clone + Debug>(optree: &Optree<T>, indent_level: usize) -> String {
+    let indentation = "    ".repeat(indent_level);
+
+    match optree {
+        Optree::Input(i) => format!("{}t[{}] = getchar();\n", indentation, i),
+        Optree::Output(i) => format!("{}putchar(t[{}]);\n", indentation, i),
+        Optree::OffsetMap(m) => {
+            let offset_map_ops = m.clone().to_opcode();
+            let mut result = String::new();
+            for op in offset_map_ops {
+                result.push_str(&match op {
+                    Opcode::AddCell(offset, to) => format!("{}t[{}] += t[{}];\n", indentation, to, to + offset as i32),
+                    Opcode::SubCell(offset, to) => format!("{}t[{}] -= t[{}];\n", indentation, to, to + offset as i32),
+                    Opcode::AddMul(val, offset, to) => format!("{}t[{}] += {} * t[{}];\n", indentation, to, val, to + offset as i32),
+                    Opcode::SetConst(val, to) => format!("{}t[{}] = {};\n", indentation, to, val),
+                    Opcode::MulConst(val, to) => format!("{}t[{}] *= {};\n", indentation, to, val),
+                    Opcode::AddConst(val, to) => format!("{}t[{}] += {};\n", indentation, to, val),
+                    Opcode::Load(from) => format!("{}reg = t[{}];\n", indentation, from),
+                    Opcode::LoadSwap(from) => format!("{}tmp = reg; reg = t[{}]; t[{}] = tmp;\n", indentation, from, from),
+                    _ => String::new()
+                });
+            }
+            result
+        },
+        Optree::Branch(uo, preshift, itershift) => {
+            let mut result = String::new();
+            result.push_str(&format!("{}t += {};\n", indentation, preshift));
+            result.push_str(&format!("{}while (*t) {{\n", indentation));
+            for o in uo {
+                result.push_str(&gen_ccode_op(o, indent_level + 1));
+            }
+            result.push_str(&format!("{}    t += {};\n{}}}\n", indentation, itershift, indentation));
+            result
+
+        },
+        Optree::DebugBreakpoint => todo!(),
+    }
+}
+
+fn gen_ccode<T: BFAffineT<isize> + Clone + Debug>(optrees: &Vec<Optree<T>>) -> String {
+    let mut result = format!("#include<stdio.h>
+unsigned char tape[{}];
+int main() {{
+    unsigned char* t = tape + {};
+    unsigned char reg;
+    unsigned char tmp;\n", u16::MAX, i16::MAX);
+
+    for ot in optrees {
+        result.push_str(&gen_ccode_op(ot, 1));
+    }
+
+    result.push_str("    return 0;\n}");
+    result
 }
 
 fn gen_opcode<T: BFAffineT<isize> + Clone + Debug>(optree: &Vec<Optree<T>>) -> Vec<Opcode> {
@@ -450,6 +524,11 @@ pub fn compile<T: BFAffineT<isize>>(s: String) -> Vec<Optree<T>> {
 // 5. [Branch(_, _, _), OffsetMap o1]
 //
 //    The value after a branch will always be 0, so we can set the column 0 in o1 to 0
+//
+// 6. [Branch(_, _, _), Branch(_, preshift = 0, _)]
+//
+//    if the preshift is 0, it can be left out, as the current val has to 0 to leave the first
+//    loop, which would immediately terminate the second one.
 pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Optree<T>>, layer: usize) -> isize {
     let mut index = 0;
     let mut total_shift = 0;
@@ -532,36 +611,70 @@ pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Opt
 }
 
 
-
-#[derive(Debug)]
+// we can either store which instruction to jump to in Jnez/Jez/J (for byte code compilation)
+// or store the label we want to jump to (for jit compilation)
+//
+// => for byte code compilation, the label gets ignored
+//
+// Structure:
+//
+// <OP> <w8> <i16|i16> <i32|i32|i32|i32>
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Opcode {
     // t and r have to be saved in a register
     AddConst(w8, i32),    // t[b] += b
                           // add BYTE [rdi], sil
     SetConst(w8, i32),    // t[b] = a
                           // mov BYTE [rdi], sil
-    AddMul(w8, i16, i32), // t[c] += t[c + b] * a
-                          // movzx   eax, BYTE PTR [rdx+rcx]
-                          // imul    eax, edi
-                          // add     BYTE PTR [rsi+rcx], al
     MulConst(w8, i32),    // t[b] *= a
                           // movzx   eax, BYTE PTR [rsi]
                           // imul    eax, edi
                           // mov     BYTE PTR [rsi], al
-    LoadSwap(i32),        // r, t[a] = t[a], r
+    AddMul(w8, i16, i32), // t[c] += t[c + b] * a
+                          // movzx   eax, BYTE PTR [rdx+rcx]
+                          // imul    eax, edi
+                          // add     BYTE PTR [rsi+rcx], al
+    AddCell(i16, i32),    // t[c] += t[c + b]
+    SubCell(i16, i32),    // t[c] += t[c + b]
     Load(i32),            // t[a] = r
-    ShiftBig(i32),        // t = t + a * i32::max
+    LoadSwap(i32),        // r, t[a] = t[a], r
     Shift(i32),           // t = t + a
+    ShiftBig(i32),        // t = t + a * i32::max
     Read(i32),            // t[a] = input_char()
     Write(i32),           // print(t[a])
-    Jnez(u32),            // if t[0] != 0: goto a
-    Jez(u32),             // if t[0] == 0: goto a
     J(u32),               // goto a
+    Jez(u32),             // if t[0] == 0: goto a
+    Jnez(u32),            // if t[0] != 0: goto a
                           // jmp label;
     Label(u32),
     DebugBreakpoint,
+    DebugData(u16, u32),  // range where in code we are
 }
 
+impl From<&Opcode> for u64 {
+    fn from(value: &Opcode) -> Self {
+        match value {
+            Opcode::AddConst(v, c) =>  ((v.0 as u64) << 48) | ((*c as u32) as u64) ,
+            Opcode::SetConst(v, c) =>  (1 << 56) | ((v.0 as u64) << 48) | ((*c as u32) as u64) ,
+            Opcode::MulConst(v, c) =>  (2 << 56) | ((v.0 as u64) << 48) | ((*c as u32) as u64) ,
+            Opcode::AddMul(v, o, c) =>  (3 << 56) | ((v.0 as u64) << 48) | (((*o as u16) as u64) << 32) | ((*c as u32) as u64) ,
+            Opcode::AddCell(o, c) =>  (4 << 56) | (((*o as u16) as u64) << 32) | ((*c as u32) as u64) ,
+            Opcode::SubCell(o, c) =>  (5 << 56) | (((*o as u16) as u64) << 32) | ((*c as u32) as u64) ,
+            Opcode::Load(c) =>  (6 << 56) | ((*c as u32) as u64) ,
+            Opcode::LoadSwap(c) =>  (7 << 56) | ((*c as u32) as u64) ,
+            Opcode::Shift(c) =>  (8 << 56) | ((*c as u32) as u64) ,
+            Opcode::ShiftBig(c) =>  (9 << 56) | ((*c as u32) as u64) ,
+            Opcode::Read(c) =>  (10 << 56) | ((*c as u32) as u64) ,
+            Opcode::Write(c) =>  (11 << 56) | ((*c as u32) as u64) ,
+            Opcode::J(c) =>  (12 << 56) | (*c as u64) ,
+            Opcode::Jez(c) =>  (13 << 56) | (*c as u64) ,
+            Opcode::Jnez(c) =>  (14 << 56) | (*c as u64) ,
+            Opcode::Label(c) =>  (15 << 56) | (*c as u64) ,
+            Opcode::DebugBreakpoint => 16 << 56,
+            Opcode::DebugData(o, c) => (17 << 56) | ((*o as u64) << 32) | (*c as u64) ,
+        }
+    }
+}
 
 impl std::fmt::Display for Opcode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -581,20 +694,15 @@ impl std::fmt::Display for Opcode {
             Opcode::LoadSwap(from) => write!(f, "\tt[{}], r = r, t[{}]", from, from),
             Opcode::AddMul(val, offset, to) => write!(f, "\tt[{}] += t[{} + {} = {}] * {}", to, to, offset, *to + *offset as i32, val),
             Opcode::DebugBreakpoint => write!(f, "\tDEBUG!"),
+            Opcode::AddCell(offset, to) => write!(f, "\tt[{}] += t[{} + {} = {}]", to, to, offset, *to + *offset as i32),
+            Opcode::SubCell(offset, to) => write!(f, "\tt[{}] += t[{} + {} = {}]", to, to, offset, *to + *offset as i32),
+            Opcode::DebugData(offset, from) => write!(f, "\t\twithin code[{} to {}]", from, from + *offset as u32)
         }
     }
 }
 
-
-
-fn simulate(mut opcode: Vec<Opcode>) {
-    let mut tape: Vec<w8> = vec![w8::ZERO;u16::MAX as usize];
-    let mut index = i16::MAX as usize;
-    let mut pc = 0;
+fn optout_labels(opcode: &mut Vec<Opcode>) {
     let mut label_map = Vec::new();
-    let mut debug_counter = -1;
-    let mut reg = w8::ZERO;
-
     for (index, i) in opcode.iter().enumerate() {
         match i {
             Opcode::Label(k) => {
@@ -612,18 +720,39 @@ fn simulate(mut opcode: Vec<Opcode>) {
             Opcode::Jez(ref mut k) | Opcode::Jnez(ref mut k) | Opcode::J(ref mut k) => {
                 *k = label_map[*k as usize] as u32;
             },
+            Opcode::Label(ref mut k) => {*k = 0u32;}
             _ => {}
         }
     }
+}
+
+fn simulate(mut opcode: Vec<Opcode>) {
+    let mut tape: Vec<w8> = vec![w8::ZERO;u16::MAX as usize];
+    let mut index = i16::MAX as usize;
+    let mut pc = 0;
+    let mut debug_counter = -1;
+    let mut reg = w8::ZERO;
+
+    optout_labels(&mut opcode);
 
     let Some(mut last_op) = opcode.first() else {return;};
+    let mut print_buffer = String::new();
+    let mut counter = 0;
     while let Some(op) = opcode.get(pc) {
+        if counter < 100000 {
+            println!("pc: {pc}, tape: {} {} {} {} {}, indexoffset: {}", tape[index as usize - 1], tape[index as usize], tape[index as usize + 1], tape[index as usize + 2], tape[index as usize + 3], index);
+            counter += 1;
+        }
         match op {
             Opcode::AddConst(val, to) => {tape[(index as isize + *to as isize) as usize] += *val;},
             Opcode::SetConst(val, to) => {tape[(index as isize + *to as isize) as usize] = *val;},
-            Opcode::AddMul(w8::ONE, offset, to) => {
+            Opcode::AddCell(offset, to) => {
                 let readout = tape[(index as isize + *to as isize + *offset as isize) as usize];
                 tape[(index as isize + *to as isize) as usize] += readout;
+            },
+            Opcode::SubCell(offset, to) => {
+                let readout = tape[(index as isize + *to as isize + *offset as isize) as usize];
+                tape[(index as isize + *to as isize) as usize] -= readout;
             },
             Opcode::AddMul(val, offset, to) => {
                 let readout = tape[(index as isize + *to as isize + *offset as isize) as usize];
@@ -640,15 +769,27 @@ fn simulate(mut opcode: Vec<Opcode>) {
             Opcode::Read(to) => {
                 tape[(index as isize + *to as isize) as usize] =  Wrapping(std::io::stdin().bytes().next().and_then(|x| x.ok()).unwrap_or_else(|| panic!("no input provided!")) );
             },
-            Opcode::Write(from) => print!("{}", tape[(index as isize + *from as isize) as usize].0 as char),
+            Opcode::Write(from) => {
+                let c = tape[(index as isize + *from as isize) as usize].0 as char;
+                if c == '\n' {
+                    println!("{}", print_buffer);
+                    print_buffer.clear();
+                } else {
+                    print_buffer.push(c)
+                }
+            },
             Opcode::Jnez(a) => { if tape[index] != w8::ZERO { pc = *a as usize; } },
             Opcode::Jez(a) => { if tape[index] == w8::ZERO { pc = *a as usize; } },
-            Opcode::J(a) => { pc = label_map[*a as usize]; },
+            Opcode::J(a) => { pc = *a as usize; },
             Opcode::Label(_) => {},
             Opcode::DebugBreakpoint => { debug_counter = 0; }
+            Opcode::DebugData(_, _) => todo!(),
+
         }
         if debug_counter == 0 {
             let mut line = String::new();
+            print!("{}", print_buffer);
+            print_buffer.clear();
             loop {
                 print!("\x1B[32mDEBUG[{}@ {}] > ", pc, format!("{}", last_op).trim());
                 std::io::stdout().flush();
@@ -734,10 +875,6 @@ fn simulate(mut opcode: Vec<Opcode>) {
 
 
 
-
-
-
-
 // // BrainFuck Affine Linear Optimizing Data Structure
 // pub trait BFAFLODS<T: Copy + Ord> : BFAffineT<T> {
 //     // in order to compile the affine transforms, we need to make sure, we 
@@ -803,33 +940,48 @@ fn simulate(mut opcode: Vec<Opcode>) {
 //     }
 // }
 
-
+pub fn write_opcode<P: AsRef<Path>>(opcodes: &Vec<Opcode>, file_path: P) -> Result<(), std::io::Error> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(file_path)?;
+    let v: Vec<u64> = opcodes.iter().map(|x| u64::from(x)).collect();
+    let v_bytes = unsafe {
+        v.align_to::<u8>().1
+    };
+    let magic_numbers = 0x627261696e66636bu64; // brainfck
+    file.write_all(&magic_numbers.to_ne_bytes())?;
+    file.write_all(&v_bytes)?;
+    Ok(())
+}
 
 pub fn main() {
+
     let args: Vec<String> = env::args().collect();
 
     let file_path = args.get(1).expect("No filepath given!");
     let contents = fs::read_to_string(file_path).expect("File doesn't exist");
     let mut tree = compile::<BFAddMap>(contents);
 
-    dbg!(&tree);
-    let opcodes = gen_opcode(&tree);
-    for (index, i) in opcodes.iter().enumerate() {
-        println!("{}: {}", index, i);
-    }
+    // dbg!(&tree);
+    // let opcodes = gen_opcode(&tree);
+    // for (index, i) in opcodes.iter().enumerate() {
+    //     println!("{}: {}", index, i);
+    // }
     optimize(&mut tree, 0);
-    println!("after optimization:");
-    dbg!(&tree);
+    // println!("after optimization:");
+    // dbg!(&tree);
 
-    let optimized_opcodes = gen_opcode(&tree);
+    let mut optimized_opcodes = gen_opcode(&tree);
+    println!("// {} opcodes", optimized_opcodes.len());
+    optout_labels(&mut optimized_opcodes);
     for (index, i) in optimized_opcodes.iter().enumerate() {
         println!("{}: {}", index, i);
     }
     //
-    // +[-[-[>]+[<]]]
-
-
-    simulate(optimized_opcodes);
+    write_opcode(&optimized_opcodes, "./result.op");
+    println!("end of rust part");
+    // println!("{}", gen_ccode(&tree));
 }
 
 #[cfg(test)]
