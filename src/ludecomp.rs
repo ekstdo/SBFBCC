@@ -107,6 +107,12 @@ impl Matrix {
         accum
     }
 
+    pub fn rm_column(&mut self, column: isize) {
+        for row in self.inner.values_mut() {
+            row.remove(&column);
+        }
+    }
+
     pub fn get_raw(&self, row: isize, column: isize) -> Option<w8> {
         self.inner.get(&row).and_then(|x| x.get(&column).copied())
     }

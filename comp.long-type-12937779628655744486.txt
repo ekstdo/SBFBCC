@@ -1,1 +1,0 @@
-Map<std::collections::btree_map::IterMut<'a, isize, V>, fn((isize, &'a mut V)) -> (isize, &'a mut V)>

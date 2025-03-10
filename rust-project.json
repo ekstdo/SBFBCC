@@ -1,8 +1,0 @@
-
-{
-	"crates": [
-		{
-			"root_module": "comp.rs"
-		}
-	]
-}

@@ -6,3 +6,8 @@ comp
 # Added by cargo
 
 /target
+/papers
+flamegraph.svg
+perf.data
+*.old
+/testing-site

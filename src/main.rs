@@ -54,6 +54,8 @@ pub trait BFAffineT<T: Copy + Ord>: Sized {
     // sets the row to zero, equivalent to setting the variable
     // after the operation to 0, for [-] and [+] and [+++] etc.
     fn set_zero(&mut self, i: T);
+    fn rm_row(&mut self, i: T);
+    fn rm_column(&mut self, i: T);
     fn set_const(&mut self, i: T, v: w8) {
         self.set_zero(i);
         self.add_const(i, v);
@@ -84,7 +86,11 @@ pub trait BFAffineT<T: Copy + Ord>: Sized {
     fn is_ident(&self) -> bool;
     fn is_affine(&self) -> bool;
     fn is_affine_at0(&self) -> bool;
+    fn affine_zero_lins(&self) -> Vec<T>;
+    fn is_affine_zero_lin(&self, i: T) -> bool;
+    fn zero_dep(&self) -> Vec<isize>; // indices, that only depend on 0 or a constant
     fn is_sure_ident(&self, i: T) -> bool;
+    fn is_sure0(&self, i: T) -> bool;
 
     fn get_affine_raw(&self, i: T) -> Option<w8>;
     fn get_affine(&self, i: T) -> w8 {
@@ -188,11 +194,42 @@ impl BFAffineT<isize> for BFAddMap {
     }
 
     fn is_affine_at0(&self) -> bool {
-        self.is_affine() && self.affine.len() == 1 && self.affine.get(&0).map(|x| x.0 & 1 == 1).unwrap_or(false)
+        !self.matrix.inner.contains_key(&0)
+    }
+
+    fn is_affine_zero_lin(&self, i: isize) -> bool {
+        self.matrix.get(i, i) == w8::ZERO && self.matrix.inner.get(&i).map_or(false, |x| x.values().all(|x| *x == w8::ZERO))
+    }
+
+    fn affine_zero_lins(&self) -> Vec<isize> {
+        self.matrix.rows().filter(|x| self.is_affine_zero_lin(**x)).copied().collect()
+    }
+
+    fn zero_dep(&self) -> Vec<isize> {
+        let mut result = Vec::new();
+        for (k, row) in &self.matrix.inner {
+            if row.contains_key(&0) && row.len() == 1 {
+                result.push(*k);
+            }
+        }
+        result
+    }
+
+    fn rm_row(&mut self, i: isize) {
+        self.affine.remove(&i);
+        self.matrix.inner.remove(&i);
+    }
+
+    fn rm_column(&mut self, i: isize) {
+        self.matrix.rm_column(i);
     }
 
     fn is_sure_ident(&self, i: isize) -> bool {
         !self.affine.contains_key(&i) && !self.matrix.inner.contains_key(&i)
+    }
+
+    fn is_sure0(&self, i: isize) -> bool {
+        !self.affine.contains_key(&i) && self.is_affine_zero_lin(i)
     }
 
     // might cache this instead
@@ -508,9 +545,172 @@ pub fn compile<T: BFAffineT<isize>>(s: String) -> Vec<Optree<T>> {
 //
 //  => a) is a special case of b)
 //
-// 2. [OffsetMap o1, OffsetMap o2]
+//    c) o contains affine only lines (can be applied to Branch([OffsetMap o, ...]) if ... doesn't
+//    rely on t[b])
 //
-//    can be optimized to o2 * o1
+//      while t[0] {
+//          t[a] = ... + a * t[b];
+//          t[b] = q;
+//      } 
+//
+//      We don't have to add t[b] at every iteration, if it's gonna be q at every iteration anyways
+//
+//      first do the if do while transform
+//
+//      if t[0] {
+//          do {
+//              t[a] = ... + a * t[b];
+//              t[b] = q;
+//          } while (t[0]);
+//      }
+//
+//      to
+//
+//      if t[0] {
+//          t[a] = ... + a * t[b];
+//          t[b] = q;
+//          while(t[0]) {
+//              t[a] = ... + a * t[b];
+//              t[b] = q;
+//          }
+//      }
+//
+//      to
+//
+//      if t[0] {
+//          t[a] = ... + a * t[b];
+//          t[b] = q;
+//          while(t[0]) {
+//              t[a] = ... + a * t[b];
+//          }
+//      }
+//
+//      to
+//
+//      if t[0] {
+//          t[a] = ... + a * t[b];
+//          t[b] = q;
+//          while(t[0]) {
+//              t[a] = ... + a * q;
+//          }
+//      }
+//
+//    d) o.is_affine_at0() && o.affine[0] % 2 == 1 && ...
+//
+//      this is a repeated matrix multiplication, which can indicate different things
+//
+//      e.g. the pattern x[temp0+x-]temp0[-[temp1+x++temp0-]x+temp1[temp0+temp1-]temp0] for x := x^2
+//
+//      becomes:
+//
+//      temp0 = x; x = 0;
+//      while temp0 > 0 {
+//          temp0 -= 1;
+//          x += 2 * temp0;
+//          x += 1;
+//         temp1 = 0;
+//      }
+//      => linear then affine representation =>
+//      while temp0 > 0 {
+//          x += 2 * temp0;
+//          x -= 1;
+//          temp0 -= 1;
+//          temp1 = 0;
+//      }
+//
+//      which is just a repeated matrix multiplication and represents a square
+//
+//      we can try to generalize this to any case, where the counter variable k (at offset "0") is only
+//      transformed affine by r and every other variable either depends on that counter (with factor a) or a constant (c)
+//      (and not each other)
+//
+//      the value of the counter at each iteration i is then:
+//
+//      k + i * r
+//
+//      and the end value of the other variable is:
+//
+//      sum_(i = 0)^(n - 1) (k + i * r) * a + c       (with n being the number of iterations)
+//
+//      = n * c + a sum_(i = 0)^(n - 1) (k + i * r)
+//      = n * c + a k n + a r  sum_(i = 0)^(n - 1) i
+//      = n * c + a k n + a r  n(n - 1)/2
+//
+//      for the x = x^2 example, we have: n = x, c = -1, k = n, a = 2, r = -1
+//      = -n + 2 n^2 - n(n - 1)
+//      = -n + 2 n^2 - n(n - 1)
+//      = n (-1 + 2 n - n + 1)
+//      = n n = x^2
+//
+//      we can also solve for n:
+//
+//      k + n * r = 0 => n = - k / r (therefore r has to be odd, otherwise, n might be infinite)
+//
+//      n * c + a k n + a r  n(n - 1)/2 becomes 
+//      - k /r * c + a k (- k /r) + a r (- k / r) (- k/r - 1) / 2
+//      = - c k / r - a k^2 / r + a k (k/r + 1) / 2
+//      = - c k / r - a k  (k/r) 2 / 2 + a k (k/r + 1) / 2
+//      = - c k / r + a k (-k/r + 1) / 2
+//      = a k (-k/r + 1) / 2 - c k / r 
+//
+//
+//      we can set s = -1/r at compile time and l = s k  at runtime
+//      = a k (s k + 1) / 2 + c s k
+////
+//      (k is even -> k (s k + 1) is even -> divisible by 2)
+//      (k is odd -> s k is odd -> s k + 1 is even -> k (s k + 1) is even -> divisible by 2)
+//
+//      How do we compute it? (as much in compile time as possible!)
+//
+//      if a is even: b = a/2 is computed at compiletime:
+//
+//          a k (l + 1) / 2 + c l
+//          = b k (l + 1)  + c l
+//
+//          compiletime:
+//          b = a / 2 
+//          s = -1/r
+//
+//          runtime:
+//          l = s * k
+//          result += c * l
+//          l += 1
+//          l *= k 
+//          result += b * l     => we only need one extra register (which we alr. do for
+//                                 permutations) and 5 lin comb instructions
+//
+//          if s is 1 (which we can detect at compiletime):
+//
+//              b k (k + 1)  + c k = b k^2 + (b + c) k
+//
+//              l = k * k
+//              result += b * l
+//              result += (b + c) k      // b + c is computed at compiletime
+//                                       // reduced to 3 lin comb inst
+//
+//      if a is odd, we can't incorporate /2 into a, but have to watch it at runtime:
+//          if k % 2 == 0 { (k/2) * ... } else {(s k + 1)/2 * ...}
+//
+//          s = -1/r
+//
+//          runtime:
+//          l = s * k
+//          result += c * l
+//          l += 1
+//          if (k % 2 == 0) { // jump if even
+//              l *= k;
+//              l >>= 1;
+//          } else {          // jump
+//              l >>= 1;
+//              l *= k;
+//          }
+//          result += a * l; // 6 lin comb inst, 2 jump inst
+//
+//
+//  2. [OffsetMap o1, OffsetMap o2]
+//
+//    can be optimized to o2 * o1 (notice that matmul is the mathematical representation,
+//    therefore o2 gets applied first)
 //
 // 3. [OffsetMap o, Input i]
 //
@@ -529,22 +729,53 @@ pub fn compile<T: BFAffineT<isize>>(s: String) -> Vec<Optree<T>> {
 //
 //    if the preshift is 0, it can be left out, as the current val has to 0 to leave the first
 //    loop, which would immediately terminate the second one.
-pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Optree<T>>, layer: usize) -> isize {
+//
+// 7. [OffsetMap o1, Branch(_, preshift, _)]
+//
+//    if the preshift row of o1 is all 0 (not empty, as empty would be identity, but really 0)
+//    Branch can be deleted
+pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Optree<T>>, layer: usize) -> (bool, isize) {
     let mut index = 0;
     let mut total_shift = 0;
+    let mut changed = false;
     while index < unoptimized.len() {
         let mut prev = false;
         let l = unoptimized.len();
         match &mut unoptimized[index] {
-            Optree::OffsetMap(ref mut _bfaddmap) if index < l - 1 => {
-                if let Some(Optree::OffsetMap(_)) = unoptimized.get(index + 1) {
+            Optree::OffsetMap(_) if index < l - 1 => {
+                let next_el = unoptimized.get(index + 1);
+                // see 2.
+                if let Some(Optree::OffsetMap(_)) = next_el {
                     let Optree::OffsetMap(mut el) = unoptimized.remove(index + 1) else { panic!("wrong check!") };
                     let Some(Optree::OffsetMap(ref mut bfaddmap)) = unoptimized.get_mut(index) else {panic!("wrong check!")};
                     el = el.matmul(bfaddmap);
                     std::mem::swap(&mut el, bfaddmap);
                     prev = true;
+
+                    changed = true;
+                }
+                // see 3.
+                else if let Some(Optree::Input(into)) = next_el {
+                    let into = *into;
+                    let Some(Optree::OffsetMap(ref mut bfaddmap)) = unoptimized.get_mut(index) else {panic!("wrong check!")};
+                    bfaddmap.rm_row(into);
+
+                    changed = true;
+                }
+                // see 7.
+                else if let Some(Optree::Branch(_, preshift, _)) = next_el {
+                    let preshift = *preshift;
+                    let Some(Optree::OffsetMap(ref mut bfaddmap)) = unoptimized.get_mut(index) else {panic!("wrong check!")};
+                    let should_remove = bfaddmap.is_sure0(preshift);
+                    if should_remove {
+                        unoptimized.remove(index + 1);
+                        prev = true;
+
+                        changed = true;
+                    }
                 }
             },
+            // see 1.
             Optree::Branch(ref mut uo, preshift, 0) if uo.len() == 1 => {
                 let preshift_ = *preshift;
                 match &mut uo[0] {
@@ -570,30 +801,34 @@ pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Opt
                                     total_shift += preshift_;
                                 }
                             }
-                            prev = true;
                             if index > 0 {
                                 index -= 1;
                             }
+                            prev = true;
+                            changed = true;
                         }
+                    }
+                    Optree::OffsetMap(ref mut m) if m.is_affine_at0() => {
+                        println!("hOi! {:?}", m.zero_dep());
                     }
                     _ => {
                         let Optree::Branch(uo, _preshift, ref mut iter_shift) = &mut unoptimized[index] else { panic!("wrong check!") };
-                        let inner_shift = optimize(&mut *uo, layer + 1);
+                        let (inner_changed, inner_shift) = optimize(&mut *uo, layer + 1);
+                        changed = changed || inner_changed;
                         *iter_shift += inner_shift;
                     }
                 }
             },
             Optree::Branch(_uo, _, _) => {
-                let prev_len = _uo.len();
-                
-                let (new_len, inner_shift) = {
+                let (inner_changed, inner_shift) = {
                     let Optree::Branch(uo, _, _) = &mut unoptimized[index] else { panic!("wrong check!") };
-                    (uo.len(), optimize(&mut *uo, layer + 1))
+                    optimize(&mut *uo, layer + 1)
                 };
+                changed = changed || inner_changed;
                 let Optree::Branch(_, _, ref mut iter_shift) = &mut unoptimized[index] else { panic!("wrong check!") };
                 *iter_shift += inner_shift;
-                if prev_len > new_len && new_len == 1 {
-                    continue;
+                if inner_changed {
+                    prev = true;
                 }
             }
             _ => {}
@@ -607,7 +842,7 @@ pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Opt
             m.unset_linear();
         }
     }
-    total_shift
+    (changed, total_shift)
 }
 
 
@@ -702,14 +937,19 @@ impl std::fmt::Display for Opcode {
 }
 
 fn optout_labels(opcode: &mut Vec<Opcode>) {
-    let mut label_map = Vec::new();
+    let mut label_map = Vec::new(); // maps each label id to the index position
+    let mut label_count = Vec::new(); // counts the amount of labels before that label
+    let mut counter = 0;
     for (index, i) in opcode.iter().enumerate() {
         match i {
             Opcode::Label(k) => {
+                counter += 1;
                 while label_map.len() <= *k as usize {
                     label_map.push(0);
+                    label_count.push(0);
                 }
                 label_map[*k as usize] = index;
+                label_count[*k as usize] = counter;
             },
             _ => {}
         }
@@ -718,12 +958,13 @@ fn optout_labels(opcode: &mut Vec<Opcode>) {
     for i in opcode.iter_mut() {
         match i {
             Opcode::Jez(ref mut k) | Opcode::Jnez(ref mut k) | Opcode::J(ref mut k) => {
-                *k = label_map[*k as usize] as u32;
+                *k = (label_map[*k as usize] - label_count[*k as usize]) as u32;
             },
-            Opcode::Label(ref mut k) => {*k = 0u32;}
             _ => {}
         }
     }
+
+    opcode.retain(|x| match x { Opcode::Label(_) => false, _ => true });
 }
 
 fn simulate(mut opcode: Vec<Opcode>) {
@@ -739,10 +980,6 @@ fn simulate(mut opcode: Vec<Opcode>) {
     let mut print_buffer = String::new();
     let mut counter = 0;
     while let Some(op) = opcode.get(pc) {
-        if counter < 100000 {
-            println!("pc: {pc}, tape: {} {} {} {} {}, indexoffset: {}", tape[index as usize - 1], tape[index as usize], tape[index as usize + 1], tape[index as usize + 2], tape[index as usize + 3], index);
-            counter += 1;
-        }
         match op {
             Opcode::AddConst(val, to) => {tape[(index as isize + *to as isize) as usize] += *val;},
             Opcode::SetConst(val, to) => {tape[(index as isize + *to as isize) as usize] = *val;},
@@ -778,9 +1015,9 @@ fn simulate(mut opcode: Vec<Opcode>) {
                     print_buffer.push(c)
                 }
             },
-            Opcode::Jnez(a) => { if tape[index] != w8::ZERO { pc = *a as usize; } },
-            Opcode::Jez(a) => { if tape[index] == w8::ZERO { pc = *a as usize; } },
-            Opcode::J(a) => { pc = *a as usize; },
+            Opcode::Jnez(a) => { if tape[index] != w8::ZERO { pc = *a as usize - 1; } },
+            Opcode::Jez(a) => { if tape[index] == w8::ZERO { pc = *a as usize - 1; } },
+            Opcode::J(a) => { pc = *a as usize - 1; },
             Opcode::Label(_) => {},
             Opcode::DebugBreakpoint => { debug_counter = 0; }
             Opcode::DebugData(_, _) => todo!(),
@@ -970,17 +1207,18 @@ pub fn main() {
     // }
     optimize(&mut tree, 0);
     // println!("after optimization:");
-    // dbg!(&tree);
+    dbg!(&tree);
 
     let mut optimized_opcodes = gen_opcode(&tree);
-    println!("// {} opcodes", optimized_opcodes.len());
     optout_labels(&mut optimized_opcodes);
-    for (index, i) in optimized_opcodes.iter().enumerate() {
-        println!("{}: {}", index, i);
-    }
-    //
+    println!("// {} opcodes", optimized_opcodes.len());
     write_opcode(&optimized_opcodes, "./result.op");
-    println!("end of rust part");
+    // for (index, i) in optimized_opcodes.iter().enumerate() {
+    //     println!("{}: {}", index, i);
+    // }
+    //
+    // println!("end of rust part");
+    // simulate(optimized_opcodes);
     // println!("{}", gen_ccode(&tree));
 }
 

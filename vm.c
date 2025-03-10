@@ -72,6 +72,7 @@ int run_bytecode(Opcode* opcodes, int num_opcodes) {
 		&&CASE_MARK_EOF
 	};
 #define DISPATCH do { goto *table[(++pc)->op]; } while (0)
+#define DISPATCH_NO_ADD do { goto *table[pc->op]; } while (0)
 	pc -= 1;
 	DISPATCH;
 	CASE_LABEL:
@@ -115,16 +116,20 @@ int run_bytecode(Opcode* opcodes, int num_opcodes) {
 		putchar(index[pc->l]);
 		DISPATCH;
 	CASE_JNEZ:
-		if (*index)
+		if (*index) {
 			pc = opcodes + pc->l;
+			DISPATCH_NO_ADD;
+		}
 		DISPATCH;
 	CASE_JEZ:
-		if (*index == 0)
+		if (*index == 0) {
 			pc = opcodes + pc->l;
+			DISPATCH_NO_ADD;
+		}
 		DISPATCH;
 	CASE_J:
 		pc = opcodes + pc->l;
-		DISPATCH;
+		DISPATCH_NO_ADD;
 	CASE_MARK_EOF:
 		return 0;
 }
