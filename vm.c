@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 
@@ -25,29 +26,30 @@ typedef enum {
 	LABEL = 15,
 	DEBUG_BREAK = 16,
 	DEBUG_DATA = 17,
-	MARK_EOF = 18
+	SKIP_LOOP = 18,
+	MARK_EOF = 19
 } Op;
 
 typedef struct {
-	signed int l;
-	signed short int s;
-	unsigned char b;
-	unsigned char op;
+	int32_t l;
+	int16_t s;
+	uint8_t b;
+	uint8_t op;
 } Opcode;
 
-unsigned char tape[U16MAX];
+uint8_t tape[U16MAX];
 
 int run_bytecode(Opcode* opcodes, int num_opcodes) {
-	/* unsigned char* tape = mmap(NULL, U16MAX, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); */
+	/* uint8_t* tape = mmap(NULL, U16MAX, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); */
 	/* if (tape == MAP_FAILED) { */
 	/* 	perror("failed to allocate memory"); */
 	/* 	exit(1); */
 	/* } */
-	/* unsigned char* tape = calloc(U16MAX , sizeof(char)); */
-	unsigned char* index = tape + U16MAX / 2 - 1;
+	/* uint8_t* tape = calloc(U16MAX , sizeof(char)); */
+	uint8_t* index = tape + U16MAX / 2 - 1;
 	Opcode* pc = opcodes;
-	unsigned char tmp;
-	unsigned char reg = 0;
+	uint8_t tmp;
+	uint8_t reg = 0;
 
 
 	static const void* table[] = {
@@ -69,6 +71,7 @@ int run_bytecode(Opcode* opcodes, int num_opcodes) {
 		&&CASE_LABEL,
 		&&CASE_DEBUG_BREAK,
 		&&CASE_DEBUG_DATA,
+		&&CASE_SKIP_LOOP,
 		&&CASE_MARK_EOF
 	};
 #define DISPATCH do { goto *table[(++pc)->op]; } while (0)
@@ -116,7 +119,7 @@ int run_bytecode(Opcode* opcodes, int num_opcodes) {
 		putchar(index[pc->l]);
 		DISPATCH;
 	CASE_JNEZ:
-		if (*index) {
+		if (__builtin_expect(!!*index, 1)) {
 			pc = opcodes + pc->l;
 			DISPATCH_NO_ADD;
 		}
@@ -130,12 +133,17 @@ int run_bytecode(Opcode* opcodes, int num_opcodes) {
 	CASE_J:
 		pc = opcodes + pc->l;
 		DISPATCH_NO_ADD;
+	CASE_SKIP_LOOP:
+		while (*index) {
+			index += pc->l;
+		}
+		DISPATCH;
 	CASE_MARK_EOF:
 		return 0;
 }
 
 void magic_number_check(FILE* fd) {
-	unsigned long long int buffer;
+	uint64_t buffer;
 	int result = fread(&buffer, sizeof(unsigned long long int), 1, fd);
 	if (result != 1) {
 		perror("missing header");
@@ -143,7 +151,7 @@ void magic_number_check(FILE* fd) {
 	}
 	if (buffer != HEADER) {
 		perror("incorrect header");
-		printf("actual header: %llx", buffer);
+		printf("actual header: %lx", buffer);
 		exit(1);
 	}
 }

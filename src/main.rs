@@ -433,13 +433,17 @@ fn gen_opcode<T: BFAffineT<isize> + Clone + Debug>(optree: &Vec<Optree<T>>) -> V
                 if *pre_shift != 0 {
                     result.push(Opcode::Shift(*pre_shift as i32));
                 }
-                result.push(Opcode::Jez((label_counter << 1) + 1));
-                result.push(Opcode::Label(label_counter << 1));
-                // when to insert the jump, where to jump to and how much to shift at each
-                // iteration
-                jmp_stack.push((stack.len(), label_counter, *post_shift as i32));
-                stack.extend(v.iter().rev());
-                label_counter += 1;
+                if v.len() == 0 {
+                    result.push(Opcode::SkipLoop(*post_shift as i32));
+                } else {
+                    result.push(Opcode::Jez((label_counter << 1) + 1));
+                    result.push(Opcode::Label(label_counter << 1));
+                    // when to insert the jump, where to jump to and how much to shift at each
+                    // iteration
+                    jmp_stack.push((stack.len(), label_counter, *post_shift as i32));
+                    stack.extend(v.iter().rev());
+                    label_counter += 1;
+                }
             }
         }
     }
@@ -882,6 +886,7 @@ pub enum Opcode {
     Jnez(u32),            // if t[0] != 0: goto a
                           // jmp label;
     Label(u32),
+    SkipLoop(i32),
     DebugBreakpoint,
     DebugData(u16, u32),  // range where in code we are
 }
@@ -907,6 +912,7 @@ impl From<&Opcode> for u64 {
             Opcode::Label(c) =>  (15 << 56) | (*c as u64) ,
             Opcode::DebugBreakpoint => 16 << 56,
             Opcode::DebugData(o, c) => (17 << 56) | ((*o as u64) << 32) | (*c as u64) ,
+            Opcode::SkipLoop(c) => (18 << 56) | ((*c as u32) as u64),
         }
     }
 }
@@ -931,7 +937,8 @@ impl std::fmt::Display for Opcode {
             Opcode::DebugBreakpoint => write!(f, "\tDEBUG!"),
             Opcode::AddCell(offset, to) => write!(f, "\tt[{}] += t[{} + {} = {}]", to, to, offset, *to + *offset as i32),
             Opcode::SubCell(offset, to) => write!(f, "\tt[{}] += t[{} + {} = {}]", to, to, offset, *to + *offset as i32),
-            Opcode::DebugData(offset, from) => write!(f, "\t\twithin code[{} to {}]", from, from + *offset as u32)
+            Opcode::DebugData(offset, from) => write!(f, "\t\twithin code[{} to {}]", from, from + *offset as u32),
+            Opcode::SkipLoop(offset) => write!(f, "\twhile (t[0]) {{ t += {}; }}", offset),
         }
     }
 }
@@ -1021,6 +1028,11 @@ fn simulate(mut opcode: Vec<Opcode>) {
             Opcode::Label(_) => {},
             Opcode::DebugBreakpoint => { debug_counter = 0; }
             Opcode::DebugData(_, _) => todo!(),
+            Opcode::SkipLoop(c) => {
+                while tape[index] != w8::ZERO {
+                    index = (index as isize + *c as isize) as usize;
+                }
+            },
 
         }
         if debug_counter == 0 {

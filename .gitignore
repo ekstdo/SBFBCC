@@ -13,3 +13,4 @@ perf.data
 *.lbf
 /testing-site
 vm
+vm_gcc
