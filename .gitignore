@@ -10,4 +10,6 @@ comp
 flamegraph.svg
 perf.data
 *.old
+*.lbf
 /testing-site
+vm

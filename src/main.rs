@@ -809,7 +809,7 @@ pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Opt
                         }
                     }
                     Optree::OffsetMap(ref mut m) if m.is_affine_at0() => {
-                        println!("hOi! {:?}", m.zero_dep());
+                        // TODO: 1c & 1d optimization
                     }
                     _ => {
                         let Optree::Branch(uo, _preshift, ref mut iter_shift) = &mut unoptimized[index] else { panic!("wrong check!") };
@@ -1207,17 +1207,17 @@ pub fn main() {
     // }
     optimize(&mut tree, 0);
     // println!("after optimization:");
-    dbg!(&tree);
+    // dbg!(&tree);
 
     let mut optimized_opcodes = gen_opcode(&tree);
     optout_labels(&mut optimized_opcodes);
     println!("// {} opcodes", optimized_opcodes.len());
-    write_opcode(&optimized_opcodes, "./result.op");
+    write_opcode(&optimized_opcodes, Path::new(file_path).with_extension("lbf"));
     // for (index, i) in optimized_opcodes.iter().enumerate() {
     //     println!("{}: {}", index, i);
     // }
     //
-    // println!("end of rust part");
+    println!("end of rust part");
     // simulate(optimized_opcodes);
     // println!("{}", gen_ccode(&tree));
 }
