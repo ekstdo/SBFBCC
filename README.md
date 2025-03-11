@@ -204,21 +204,21 @@ The value of the counter at each iteration $i$ is then: $k + i * r$
 
 and the end value of the other variable is: (with n being the number of iterations)
 
-```math 
-& \sum_{i = 0}^{n - 1} (k + i * r) * a + c \
 
-&= n \cdot c + a sum_(i = 0)^(n - 1) (k + i \cdot r) \
-&= n \cdot c + a k n + a r  sum_(i = 0)^(n - 1) i \ 
-&= n \cdot c + a k n + a r  n(n - 1)/2
-```
+$$\sum_{i = 0}^{n - 1} (k + i * r) * a + c$$
+
+$$n \cdot c + a \sum_{i = 0}^{n - 1} (k + i \cdot r)$$
+
+$$n \cdot c + a k n + a r  \sum_{i = 0}^{n - 1} i$$
+
+$$n \cdot c + a k n + a r  n(n - 1)/2$$
 
 for the x = x^2 example, we have: $n = x, c = -1, k = n, a = 2, r = -1$
-```math
-&= -n + 2 n^2 - n(n - 1)
-&= -n + 2 n^2 - n(n - 1)
-&= n (-1 + 2 n - n + 1)
-&= n n = x^2
-```
+
+$$= -n + 2 n^2 - n(n - 1)$$
+$$= -n + 2 n^2 - n(n - 1)$$
+$$= n (-1 + 2 n - n + 1)$$
+$$= n n = x^2$$
 
 we can also solve for $n$:
 
@@ -226,20 +226,18 @@ $k + n \cdot r = 0 \Rightarrow n = - k / r$ (therefore r has to be odd, otherwis
 
 $n \cdot c + a k n + a r  n(n - 1)/2$ becomes 
 
-```math
-&- k /r \cdot c + a k (- k /r) + a r (- k / r) (- k/r - 1) / 2 \
-&= - c k / r - a k^2 / r + a k (k/r + 1) / 2 \
-&= - c k / r - a k  (k/r) 2 / 2 + a k (k/r + 1) / 2 \
-&= - c k / r + a k (-k/r + 1) / 2 \
-&= a k (-k/r + 1) / 2 - c k / r
-```
+$$- k /r \cdot c + a k (- k /r) + a r (- k / r) (- k/r - 1) / 2$$
+$$= - c k / r - a k^2 / r + a k (k/r + 1) / 2$$
+$$= - c k / r - a k  (k/r) 2 / 2 + a k (k/r + 1) / 2$$
+$$= - c k / r + a k (-k/r + 1) / 2$$
+$$= a k (-k/r + 1) / 2 - c k / r$$
 
 
 we can set $s = -1/r$ at compile time and $l = s k$  at runtime
 $= a k (s k + 1) / 2 + c s k$
 
-(k is even -> k (s k + 1) is even -> divisible by 2)
-(k is odd -> s k is odd -> s k + 1 is even -> k (s k + 1) is even -> divisible by 2)
+(k is even -> $k (s k + 1)$ is even -> divisible by 2)
+(k is odd -> $s k$ is odd -> $s k + 1$ is even -> $k (s k + 1)$ is even -> divisible by 2)
 
 How do we compute it? (as much in compile time as possible!)
 
