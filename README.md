@@ -204,30 +204,28 @@ The value of the counter at each iteration $i$ is then: $k + i * r$
 
 and the end value of the other variable is: (with n being the number of iterations)
 
-$$ & \sum_{i = 0}^{n - 1} (k + i * r) * a + c \
+$$& \sum_{i = 0}^{n - 1} (k + i * r) * a + c \
 
 &= n \cdot c + a sum_(i = 0)^(n - 1) (k + i \cdot r) \
 &= n \cdot c + a k n + a r  sum_(i = 0)^(n - 1) i \ 
-&= n \cdot c + a k n + a r  n(n - 1)/2 \
-
-$$
+&= n \cdot c + a k n + a r  n(n - 1)/2$$
 
 for the x = x^2 example, we have: $n = x, c = -1, k = n, a = 2, r = -1$
-$$ &= -n + 2 n^2 - n(n - 1)
+$$&= -n + 2 n^2 - n(n - 1)
 &= -n + 2 n^2 - n(n - 1)
 &= n (-1 + 2 n - n + 1)
-&= n n = x^2 $$
+&= n n = x^2$$
 
 we can also solve for $n$:
 
 $k + n \cdot r = 0 \Rightarrow n = - k / r$ (therefore r has to be odd, otherwise, n might be infinite)
 
 $n \cdot c + a k n + a r  n(n - 1)/2$ becomes 
-$$ &- k /r \cdot c + a k (- k /r) + a r (- k / r) (- k/r - 1) / 2 \
+$$&- k /r \cdot c + a k (- k /r) + a r (- k / r) (- k/r - 1) / 2 \
 &= - c k / r - a k^2 / r + a k (k/r + 1) / 2 \
 &= - c k / r - a k  (k/r) 2 / 2 + a k (k/r + 1) / 2 \
 &= - c k / r + a k (-k/r + 1) / 2 \
-&= a k (-k/r + 1) / 2 - c k / r $$
+&= a k (-k/r + 1) / 2 - c k / r$$
 
 
 we can set $s = -1/r$ at compile time and $l = s k$  at runtime
