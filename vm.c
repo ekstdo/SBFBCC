@@ -23,23 +23,62 @@ typedef enum {
 	J = 12,
 	JEZ = 13,
 	JNEZ = 14,
-	LABEL = 15,
-	DEBUG_BREAK = 16,
-	DEBUG_DATA = 17,
-	SKIP_LOOP = 18,
-	MARK_EOF = 19
+	JNEZ_SHIFT = 15,
+	LABEL = 16,
+	DEBUG_BREAK = 17,
+	DEBUG_DATA = 18,
+	SKIP_LOOP = 19,
+	MARK_EOF = 20
 } Op;
+
+char opnames[30][14] = {
+	"ADD_CONST",
+	"SET_CONST",
+	"MUL_CONST",
+	"ADD_MUL",
+	"ADD_CELL",
+	"SUB_CELL",
+	"LOAD",
+	"LOAD_SWAP",
+	"SHIFT",
+	"SHIFT_BIG",
+	"READ",
+	"WRITE",
+	"J",
+	"JEZ",
+	"JNEZ",
+	"JNEZ_SHIFT",
+	"LABEL",
+	"DEBUG_BREAK",
+	"DEBUG_DATA",
+	"SKIP_LOOP",
+	"MARK_EOF"
+};
 
 typedef struct {
 	int32_t l;
 	int16_t s;
 	uint8_t b;
 	uint8_t op;
-} Opcode;
+} ParsedOpcode;
 
+typedef struct {
+	uint8_t op;
+	uint8_t b;
+	int32_t v1;
+	int32_t v2;
+} BigOpcode;
+
+int profile_jez_true = 0;
+int profile_jez_false = 0;
+int profile_jnez_true = 0;
+int profile_jnez_false = 0;
 /* uint8_t tape[U16MAX]; */
+int profile_inst[U16MAX];
+int profile_inst_type[30];
+int profile_factor[256];
 
-int run_bytecode(Opcode* opcodes, int num_opcodes) {
+int run_bytecode(ParsedOpcode* opcodes, int num_opcodes) {
 	uint8_t* tape = mmap(NULL, U16MAX, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (tape == MAP_FAILED) {
 		perror("failed to allocate memory");
@@ -47,7 +86,7 @@ int run_bytecode(Opcode* opcodes, int num_opcodes) {
 	}
 	/* uint8_t* tape = calloc(U16MAX , sizeof(char)); */
 	uint8_t* index = tape + U16MAX / 2 - 1;
-	Opcode* pc = opcodes;
+	ParsedOpcode* pc = opcodes;
 	uint8_t tmp;
 	uint8_t reg = 0;
 
@@ -68,78 +107,105 @@ int run_bytecode(Opcode* opcodes, int num_opcodes) {
 		&&CASE_J,
 		&&CASE_JEZ,
 		&&CASE_JNEZ,
+		&&CASE_JNEZ_SHIFT,
 		&&CASE_LABEL,
 		&&CASE_DEBUG_BREAK,
 		&&CASE_DEBUG_DATA,
 		&&CASE_SKIP_LOOP,
 		&&CASE_MARK_EOF
 	};
-#define DISPATCH do { goto *table[(++pc)->op]; } while (0)
-#define DISPATCH_NO_ADD do { goto *table[pc->op]; } while (0)
-	pc -= 1;
+#define DISPATCH do { profile_inst_type[pc->op] += 1; goto *table[pc->op]; } while (0)
 	DISPATCH;
-	CASE_LABEL:
-	CASE_SHIFT_BIG:
-	CASE_DEBUG_BREAK:
-	CASE_DEBUG_DATA:
-		DISPATCH;
+
 	CASE_ADD_CONST:
 		index[pc->l] += pc->b;
+		pc += 1;
 		DISPATCH;
 	CASE_SET_CONST:
 		index[pc->l] = pc->b;
+		pc += 1;
 		DISPATCH;
 	CASE_MUL_CONST:
 		index[pc->l] *= pc->b;
+		pc += 1;
 		DISPATCH;
 	CASE_ADD_MUL:
-		index[pc->l] += index[pc->l + pc->s] * pc->b;
+		index[pc->l] += pc->b * index[pc->s];
+		profile_factor[pc->b] += 1;
+		pc += 1;
 		DISPATCH;
 	CASE_ADD_CELL:
 		index[pc->l] += index[pc->l + pc->s];
+		pc += 1;
 		DISPATCH;
 	CASE_SUB_CELL:
 		index[pc->l] -= index[pc->l + pc->s];
+		pc += 1;
 		DISPATCH;
 	CASE_LOAD:
 		reg = index[pc->l];
+		pc += 1;
 		DISPATCH;
 	CASE_LOAD_SWAP:
 		tmp = index[pc->l];
 		index[pc->l] = reg;
 		reg = tmp;
+		pc += 1;
 		DISPATCH;
 	CASE_SHIFT:
 		index += (signed int) pc->l;
+		pc += 1;
 		DISPATCH;
 	CASE_READ:
 		index[pc->l] = getchar();
+		pc += 1;
 		DISPATCH;
 	CASE_WRITE:
 		putchar(index[pc->l]);
-		DISPATCH;
-	CASE_JNEZ:
+		pc += 1;
+		DISPATCH;;
+	CASE_JNEZ_SHIFT:
+		index += pc->s;
+		// 92% success rate for this branch for mandelbrot.lbf
 		if (__builtin_expect(!!*index, 1)) {
 			pc = opcodes + pc->l;
-			DISPATCH_NO_ADD;
+		} else {
+			pc += 1;
 		}
 		DISPATCH;
 	CASE_JEZ:
 		if (!*index) {
 			pc = opcodes + pc->l;
-			DISPATCH_NO_ADD;
+		} else {
+			pc += 1;
 		}
 		DISPATCH;
-	CASE_J:
-		pc = opcodes + pc->l;
-		DISPATCH_NO_ADD;
+
 	CASE_SKIP_LOOP:
 		while (*index) {
 			index += pc->l;
 		}
+		pc += 1;
 		DISPATCH;
 	CASE_MARK_EOF:
 		return 0;
+
+	CASE_J:
+		pc = opcodes + pc->l;
+		DISPATCH;
+	CASE_JNEZ:
+		if (*index) {
+			pc = opcodes + pc->l;
+		} else {
+			pc += 1;
+		}
+		DISPATCH;
+
+	CASE_LABEL:
+	CASE_SHIFT_BIG:
+	CASE_DEBUG_BREAK:
+	CASE_DEBUG_DATA:
+		DISPATCH;
 }
 
 void magic_number_check(FILE* fd) {
@@ -156,16 +222,16 @@ void magic_number_check(FILE* fd) {
 	}
 }
 
-Opcode* read_opcodes(FILE* fd, size_t* num_opcodes) {
-	Opcode* opcodes = malloc(sizeof(Opcode) * INITIAL_BUFFER_SIZE);
+ParsedOpcode* read_opcodes(FILE* fd, size_t* num_opcodes) {
+	ParsedOpcode* opcodes = malloc(sizeof(ParsedOpcode) * INITIAL_BUFFER_SIZE);
 	size_t capacity = INITIAL_BUFFER_SIZE;
 	size_t len = 0;
 	while (!feof(fd)) {
 		if (len == capacity) {
-			opcodes = realloc(opcodes, sizeof(Opcode) * capacity * 2);
+			opcodes = realloc(opcodes, sizeof(ParsedOpcode) * capacity * 2);
 			capacity *= 2;
 		}
-		int result = fread(opcodes + len, sizeof(Opcode), 1, fd);
+		int result = fread(opcodes + len, sizeof(ParsedOpcode), 1, fd);
 		if (result != 1) {
 			printf("incomplete opcode: %x\n",  opcodes[len]);
 		} else {
@@ -173,11 +239,11 @@ Opcode* read_opcodes(FILE* fd, size_t* num_opcodes) {
 		}
 	}
 	if (len == capacity) {
-		opcodes = realloc(opcodes, sizeof(Opcode) * capacity * 2);
+		opcodes = realloc(opcodes, sizeof(ParsedOpcode) * capacity * 2);
 		capacity *= 2;
 	}
 
-	Opcode end = { .op = MARK_EOF };
+	ParsedOpcode end = { .op = MARK_EOF };
 	opcodes[len] = end;
 	printf("read %zu opcodes in total\n", len);
 	*num_opcodes = len;
@@ -197,9 +263,19 @@ int main(int argc, char** argv) {
 
 	magic_number_check(fd);
 	size_t num_opcodes = 0;
-	Opcode* opcodes = read_opcodes(fd, &num_opcodes);
+	ParsedOpcode* opcodes = read_opcodes(fd, &num_opcodes);
+	fclose(fd);
 	run_bytecode(opcodes, num_opcodes);
 	
-	fclose(fd);
+	printf("JNEZ Success: %d\nJNEZ Fail: %d\nJEZ Success: %d\nJEZ Fail: %d\n", profile_jnez_true, profile_jnez_false, profile_jez_true, profile_jez_false);
+	for (int i = 0; i < MARK_EOF; i++) {
+		printf("%s: %d\n", opnames[i], profile_inst_type[i]);
+	}
+
+	for (int i = 0; i < 256; i++) {
+		if (profile_factor[i] != 0) {
+			printf("%d:\t %d\n", i, profile_factor[i]);
+		}
+	}
 	return 0;
 }
