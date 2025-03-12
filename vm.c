@@ -37,14 +37,14 @@ typedef struct {
 	uint8_t op;
 } Opcode;
 
-uint8_t tape[U16MAX];
+/* uint8_t tape[U16MAX]; */
 
 int run_bytecode(Opcode* opcodes, int num_opcodes) {
-	/* uint8_t* tape = mmap(NULL, U16MAX, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); */
-	/* if (tape == MAP_FAILED) { */
-	/* 	perror("failed to allocate memory"); */
-	/* 	exit(1); */
-	/* } */
+	uint8_t* tape = mmap(NULL, U16MAX, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (tape == MAP_FAILED) {
+		perror("failed to allocate memory");
+		exit(1);
+	}
 	/* uint8_t* tape = calloc(U16MAX , sizeof(char)); */
 	uint8_t* index = tape + U16MAX / 2 - 1;
 	Opcode* pc = opcodes;
@@ -125,7 +125,7 @@ int run_bytecode(Opcode* opcodes, int num_opcodes) {
 		}
 		DISPATCH;
 	CASE_JEZ:
-		if (*index == 0) {
+		if (!*index) {
 			pc = opcodes + pc->l;
 			DISPATCH_NO_ADD;
 		}

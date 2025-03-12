@@ -643,6 +643,29 @@ impl Matrix {
         self.inner.iter_mut().for_each(|(_, r)| shift_bmap(r, by) );
         shift_bmap(&mut self.inner, by);
     }
+
+    // this function as assumes optimized rows
+    pub fn zero_rows(&self, exclude_columns: &BTreeMap<isize, w8>) -> (BTreeSet<isize>, BTreeSet<isize>) {
+        let mut zero_rows = BTreeSet::new(); // have to be 0
+        let mut non_zero_rows = BTreeSet::new(); // may or may not be 0
+        self.inner.iter().for_each(|(k, r)|  {
+            let mut zero_row = true;
+            for (c, (v1, v2)) in BTreeZipOr::new(r, exclude_columns) {
+                if v2.is_some() {
+                    continue;
+                }
+                if (c == k || v1 != None) && v1 != Some(&w8::ZERO)  { // i.e. non-zero
+                    non_zero_rows.insert(*k);
+                    zero_row = false;
+                    break;
+                }
+            }
+            if zero_row {
+                zero_rows.insert(*k);
+            }
+        });
+        (zero_rows, non_zero_rows)
+    }
 }
 
 impl From<Vec<Vec<u8>>> for Matrix {

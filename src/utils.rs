@@ -51,6 +51,51 @@ impl<'a, K: Ord, V> Iterator for BTreeChain<'a, K, V> {
 
 
 
+pub struct BTreeWithout<'a, K, V> {
+    a: btree_map::Iter<'a, K, V>,
+    b: btree_map::Iter<'a, K, V>,
+    next_a: Option<(&'a K, &'a V)>,
+    next_b: Option<(&'a K, &'a V)>
+}
+
+impl<'a, K, V> BTreeWithout<'a, K, V> {
+    pub fn new(a: &'a BTreeMap<K, V>, b: &'a BTreeMap<K, V>) -> Self {
+        let mut a = a.iter();
+        let next_a = a.next();
+        let mut b = b.iter();
+        let next_b = b.next();
+        Self { a, b, next_a, next_b }
+    }
+}
+
+impl<'a, K: Ord, V> Iterator for BTreeWithout<'a, K, V> {
+    type Item = (&'a K, Option<&'a V>);
+    fn next(&mut self) -> Option<Self::Item> {
+        match (self.next_a, self.next_b) {
+            (None, _) => None,
+            (Some(i), None) => {
+                self.next_a = self.a.next();
+                Some((i.0, Some(i.1)))
+            },
+            (Some(i), Some(j)) => {
+                if i.0 == j.0 {
+                    self.next_a = self.a.next();
+                    self.next_b = self.b.next();
+                    None
+                } else if i.0 < j.0 {
+                    self.next_a = self.a.next();
+                    Some((i.0, Some(i.1)))
+                } else {
+                    self.next_b = self.b.next();
+                    self.next()
+                }
+            }
+        }
+    }
+}
+
+
+
 
 
 

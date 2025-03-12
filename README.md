@@ -169,7 +169,7 @@ This works, as long es the entire branch
 
 This is a repeated matrix multiplication, which can indicate different things
 
-e.g. the pattern `x[temp0+x-]temp0[-[temp1+x++temp0-]x+temp1[temp0+temp1-]temp0]` for [$x := x^2$](https://esolangs.org/wiki/Brainfuck_algorithms#x%C2%B4_=_x_*_x)
+e.g. [the pattern](https://esolangs.org/wiki/Brainfuck_algorithms#x%C2%B4_=_x_*_x) `x[temp0+x-]temp0[-[temp1+x++temp0-]x+temp1[temp0+temp1-]temp0]` for $x := x^2$
 
 becomes:
 
@@ -286,12 +286,6 @@ if a is odd, we can't incorporate /2 into a, but have to watch it at runtime:
     }
     result += a * l; // 6 lin comb inst, 2 jump inst
 ```
-
-
-
-
-### Higher order polynomials and Horner scheme or finite differences (TODO)
-
 
 
 ## Optimizations at Code Gen
