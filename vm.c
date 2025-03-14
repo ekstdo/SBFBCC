@@ -1,11 +1,19 @@
 #include <stdio.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 
 #define U16MAX 65536
+#define INITIAL_INDEX (U16MAX / 2 - 1)
 #define HEADER 0x627261696e66636b
 #define INITIAL_BUFFER_SIZE 20
+
+/* #define PROFILE_ALL */
+#define ENABLE_DEBUGGER
+
+
 
 typedef enum {
 	ADD_CONST = 0,
@@ -13,33 +21,37 @@ typedef enum {
 	MUL_CONST = 2,
 	ADD_MUL = 3,
 	ADD_CELL = 4,
-	SUB_CELL = 5,
-	LOAD = 6,
-	LOAD_SWAP = 7,
-	SHIFT = 8,
-	SHIFT_BIG = 9,
-	READ = 10,
-	WRITE = 11,
-	J = 12,
-	JEZ = 13,
-	JNEZ = 14,
-	JNEZ_SHIFT = 15,
-	LABEL = 16,
-	DEBUG_BREAK = 17,
-	DEBUG_DATA = 18,
-	SKIP_LOOP = 19,
-	MARK_EOF = 20
+	ADDN_SET0 = 5,
+	SUB_CELL = 6,
+	LOAD = 7,
+	LOAD_SWAP = 8,
+	SWAP = 9,
+	SHIFT = 10,
+	SHIFT_BIG = 11,
+	READ = 12,
+	WRITE = 13,
+	J = 14,
+	JEZ = 15,
+	JNEZ = 16,
+	JNEZ_SHIFT = 17,
+	SKIP_LOOP = 18,
+	LABEL = 19,
+	DEBUG_BREAK = 20,
+	DEBUG_DATA = 21,
+	MARK_EOF = 22
 } Op;
 
-char opnames[30][14] = {
+char opnames[1+MARK_EOF][14] = {
 	"ADD_CONST",
 	"SET_CONST",
 	"MUL_CONST",
 	"ADD_MUL",
 	"ADD_CELL",
+	"ADDN_SET0",
 	"SUB_CELL",
 	"LOAD",
 	"LOAD_SWAP",
+	"SWAP",
 	"SHIFT",
 	"SHIFT_BIG",
 	"READ",
@@ -55,6 +67,27 @@ char opnames[30][14] = {
 	"MARK_EOF"
 };
 
+char* rtrim(char* s) {
+	size_t length = strlen(s);
+	char* back = s + length;
+	while (isspace(*--back)) {}
+	*(back + 1) = '\0';
+	return s;
+}
+
+char* ltrim(char *s) {
+	while (isspace(*s)) {s += 1;}
+	return s;
+}
+
+char* trim(char* s) {
+	if (s == NULL) {
+		fprintf(stderr, "%s", "Trimming met with a NULL string\n");
+		return s;
+	}
+	return rtrim(ltrim(s));
+}
+
 typedef struct {
 	int32_t l;
 	int16_t s;
@@ -62,21 +95,72 @@ typedef struct {
 	uint8_t op;
 } ParsedOpcode;
 
-typedef struct {
-	uint8_t op;
-	uint8_t b;
-	int32_t v1;
-	int32_t v2;
-} BigOpcode;
+
+char* print_instruction(ParsedOpcode* op);
+
+unsigned num_bits(int x) {
+	unsigned bits, var = (x < 0) ? -x : x;
+	for(bits = 0; var != 0; ++bits) var >>= 1;
+	return bits;
+}
+
+unsigned char colors[20][3] = {
+    {0xf4, 0x86, 0xde},
+    {0xff, 0x84, 0xd4},
+    {0xff, 0x85, 0xc9},
+    {0xff, 0x8d, 0xbd},
+    {0xff, 0x95, 0xb4},
+    {0xff, 0x9b, 0xad},
+    {0xff, 0xa1, 0xa6},
+    {0xff, 0xa7, 0x9f},
+    {0xff, 0xac, 0x98},
+    {0xff, 0xb1, 0x90},
+    {0xff, 0xb6, 0x86},
+    {0xff, 0xbb, 0x77},
+    {0xff, 0xc0, 0x61},
+    {0xff, 0xc8, 0x53},
+    {0xf9, 0xd1, 0x4f},
+    {0xed, 0xda, 0x4f},
+    {0xdf, 0xe3, 0x52},
+    {0xd0, 0xeb, 0x59},
+    {0xbf, 0xf3, 0x63},
+    {0xac, 0xfa, 0x70},
+};
+
+#define MIN(x, y) (x > y ? y : x)
+
+char* get_grad_factor(int x, float factor){
+	unsigned char* col_this = colors[19-MIN((int) (num_bits(x) * factor), 20 - 1)];
+	char* buffer = malloc(20);
+	sprintf(buffer, "\x1b[38;2;%d;%d;%dm", col_this[0], col_this[1], col_this[2]);
+	return buffer;
+}
+
+char* get_grad(int x){
+	unsigned char* col_this = colors[19-MIN(num_bits(x), 20 - 1)];
+	char* buffer = malloc(20);
+	sprintf(buffer, "\x1b[38;2;%d;%d;%dm", col_this[0], col_this[1], col_this[2]);
+	return buffer;
+}
+
+#ifdef PROFILE_ALL
 
 int profile_jez_true = 0;
 int profile_jez_false = 0;
 int profile_jnez_true = 0;
 int profile_jnez_false = 0;
+int profile_jnezs_true = 0;
+int profile_jnezs_false = 0;
 /* uint8_t tape[U16MAX]; */
 int profile_inst[U16MAX];
-int profile_inst_type[30];
-int profile_factor[256];
+int profile_inst_type[MARK_EOF];
+int profile_add_mul[256];
+int profile_add_const[256];
+int profile_set_const[256];
+
+int profile_from_to[MARK_EOF][MARK_EOF];
+
+#endif /* ifdef PROFILE_ALL */
 
 int run_bytecode(ParsedOpcode* opcodes, int num_opcodes) {
 	uint8_t* tape = mmap(NULL, U16MAX, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -85,10 +169,27 @@ int run_bytecode(ParsedOpcode* opcodes, int num_opcodes) {
 		exit(1);
 	}
 	/* uint8_t* tape = calloc(U16MAX , sizeof(char)); */
-	uint8_t* index = tape + U16MAX / 2 - 1;
-	ParsedOpcode* pc = opcodes;
+	register uint8_t* index = tape + INITIAL_INDEX;
+	register ParsedOpcode* pc = opcodes;
 	uint8_t tmp;
-	uint8_t reg = 0;
+	register uint8_t reg = 0;
+
+#ifdef ENABLE_DEBUGGER
+	int debug_counter = -1;
+	ParsedOpcode* last_pc = opcodes;
+	#define PC(action) do { last_pc = pc; pc action; debug_counter -= 1; if (!debug_counter) goto DEBUG; } while (0);
+#else
+	#define PC(action) do { pc action; } while(0);
+#endif /* ifdef ENABLE_DEBUGGER */
+
+
+#ifdef PROFILE_ALL
+#define PROFILE_INST do { profile_inst_type[pc->op] += 1; profile_inst[pc - opcodes] += 1; profile_from_to[(pc - 1)->op][pc->op] += 1; } while (0);
+#define PROFILE_INC(x) do { x += 1; } while (0);
+#else
+#define PROFILE_INST
+#define PROFILE_INC(x) 
+#endif
 
 
 	static const void* table[] = {
@@ -97,9 +198,11 @@ int run_bytecode(ParsedOpcode* opcodes, int num_opcodes) {
 		&&CASE_MUL_CONST,
 		&&CASE_ADD_MUL,
 		&&CASE_ADD_CELL,
+		&&CASE_ADDN_SET0,
 		&&CASE_SUB_CELL,
 		&&CASE_LOAD,
 		&&CASE_LOAD_SWAP,
+		&&CASE_SWAP,
 		&&CASE_SHIFT,
 		&&CASE_SHIFT_BIG,
 		&&CASE_READ,
@@ -108,104 +211,257 @@ int run_bytecode(ParsedOpcode* opcodes, int num_opcodes) {
 		&&CASE_JEZ,
 		&&CASE_JNEZ,
 		&&CASE_JNEZ_SHIFT,
+		&&CASE_SKIP_LOOP,
 		&&CASE_LABEL,
 		&&CASE_DEBUG_BREAK,
 		&&CASE_DEBUG_DATA,
-		&&CASE_SKIP_LOOP,
 		&&CASE_MARK_EOF
 	};
-#define DISPATCH do { profile_inst_type[pc->op] += 1; goto *table[pc->op]; } while (0)
+
+
+#define DISPATCH do { \
+	PROFILE_INST \
+	goto *table[pc->op]; \
+} while (0)
+
 	DISPATCH;
 
 	CASE_ADD_CONST:
 		index[pc->l] += pc->b;
-		pc += 1;
+		PROFILE_INC(profile_add_const[pc->b]);
+		PC(+= 1);
 		DISPATCH;
 	CASE_SET_CONST:
 		index[pc->l] = pc->b;
-		pc += 1;
+		PROFILE_INC(profile_set_const[pc->b]);
+		PC(+= 1);
 		DISPATCH;
 	CASE_MUL_CONST:
 		index[pc->l] *= pc->b;
-		pc += 1;
+		PC(+= 1);
 		DISPATCH;
 	CASE_ADD_MUL:
-		index[pc->l] += pc->b * index[pc->s];
-		profile_factor[pc->b] += 1;
-		pc += 1;
+		index[pc->l] += pc->b * index[pc-> l + pc->s];
+		PROFILE_INC(profile_add_mul[pc->b]);
+		PC(+= 1);
 		DISPATCH;
 	CASE_ADD_CELL:
 		index[pc->l] += index[pc->l + pc->s];
-		pc += 1;
+		PC(+= 1);
+		DISPATCH;
+	CASE_ADDN_SET0:
+		index[pc->l] += index[pc->l + pc->s];
+		index[pc->l + pc->s] = 0;
+		PC(+= 1);
 		DISPATCH;
 	CASE_SUB_CELL:
 		index[pc->l] -= index[pc->l + pc->s];
-		pc += 1;
+		PC(+= 1);
 		DISPATCH;
 	CASE_LOAD:
 		reg = index[pc->l];
-		pc += 1;
-		DISPATCH;
+		PC(+= 1);
 	CASE_LOAD_SWAP:
-		tmp = index[pc->l];
-		index[pc->l] = reg;
-		reg = tmp;
-		pc += 1;
+		do {
+			tmp = index[pc->l];
+			index[pc->l] = reg;
+			reg = tmp;
+			PC(+= 1);
+		} while (pc->op == LOAD_SWAP);
+		DISPATCH;
+	CASE_SWAP:
+		tmp = index[pc->l + pc->s];
+		index[pc->l + pc->s] = index[pc->l];
+		index[pc->l] = tmp;
+		PC(+= 1);
 		DISPATCH;
 	CASE_SHIFT:
 		index += (signed int) pc->l;
-		pc += 1;
+		PC(+= 1);
 		DISPATCH;
 	CASE_READ:
 		index[pc->l] = getchar();
-		pc += 1;
+		PC(+= 1);
 		DISPATCH;
 	CASE_WRITE:
 		putchar(index[pc->l]);
-		pc += 1;
+		PC(+= 1);
 		DISPATCH;;
 	CASE_JNEZ_SHIFT:
 		index += pc->s;
 		// 92% success rate for this branch for mandelbrot.lbf
 		if (__builtin_expect(!!*index, 1)) {
-			pc = opcodes + pc->l;
+			PC(= opcodes + pc->l);
+			PROFILE_INC(profile_jnezs_true);
+			DISPATCH;
 		} else {
-			pc += 1;
+			PC(+= 1);
+			PROFILE_INC(profile_jnezs_false);
+			DISPATCH;
 		}
-		DISPATCH;
 	CASE_JEZ:
 		if (!*index) {
-			pc = opcodes + pc->l;
+			PC(= opcodes + pc->l);
+			PROFILE_INC(profile_jez_true);
+			DISPATCH;
 		} else {
-			pc += 1;
+			PC(+= 1);
+			PROFILE_INC(profile_jez_false);
+			DISPATCH;
 		}
-		DISPATCH;
 
 	CASE_SKIP_LOOP:
 		while (*index) {
 			index += pc->l;
 		}
-		pc += 1;
+		PC(+= 1);
 		DISPATCH;
 	CASE_MARK_EOF:
 		return 0;
-
-	CASE_J:
-		pc = opcodes + pc->l;
-		DISPATCH;
 	CASE_JNEZ:
 		if (*index) {
-			pc = opcodes + pc->l;
+			PROFILE_INC(profile_jnez_true);
+			CASE_J:
+			PC(= opcodes + pc->l);
+			DISPATCH;
 		} else {
-			pc += 1;
+			PROFILE_INC(profile_jnez_false);
+			PC(+= 1);
+			DISPATCH;
 		}
-		DISPATCH;
 
+	CASE_DEBUG_BREAK:
+#ifdef ENABLE_DEBUGGER
+		goto DEBUG;
+#endif
 	CASE_LABEL:
 	CASE_SHIFT_BIG:
-	CASE_DEBUG_BREAK:
 	CASE_DEBUG_DATA:
+		PC(+= 1);
 		DISPATCH;
+
+#ifdef ENABLE_DEBUGGER
+	DEBUG:
+		printf("\x1b[32m[ENTERED DEBUG MODE]\n");
+		printf("\treg:    %d\n", reg);
+		printf("\tindex:  %ld\n", index - tape - INITIAL_INDEX);
+		printf("\ttape [%ld to %ld]: [", index - tape - 10 - INITIAL_INDEX, index - tape + 10 - INITIAL_INDEX);
+		for (int i = 10; i > 0; i --) 
+			printf("%d, ", *(index - i));
+		printf("< %d >, ", *index);
+		for (int i = 1; i < 10; i ++) 
+			printf("%d, ", *(index + i));
+		printf("%d", *(index + 10));
+		printf("]\n");
+
+		for (int i = -5; i <= 5; i++) {
+			if (last_pc - opcodes + i < 0) { continue; }
+			if (last_pc - opcodes + i >= num_opcodes) { continue; }
+			char* co = print_instruction(last_pc + i);
+			if (i == 0) {
+				printf("\x1b[0m\x1b[42m");
+			}
+			printf("%5ld: %s", last_pc - opcodes + i, co);
+			if (i == 0) {
+				printf("\x1b[0m\x1b[32m");
+			}
+			printf("\n");
+			free(co);
+		}
+
+		do {
+			char buffer[50];
+		DEBUG_START:
+			printf("\x1b[32mDEBUG[%ld @ %s] > ", pc - opcodes, opnames[last_pc->op]);
+			fflush(stdout);
+			fgets(buffer, 49, stdin);
+
+			int num_args = 0;
+			char debug_op;
+			int arg1;
+			int arg2;
+			char* token = strtok(buffer, " ");
+			char* parse_err;
+
+			while (token != NULL) {
+				if (num_args == 0) {
+					debug_op = token[0];
+				} else if (num_args == 1) {
+					arg1 = strtol(token, &parse_err, 10);
+					if (*parse_err != 0 && !isspace(*parse_err)) { printf("couldn't parse first number!\n"); goto DEBUG_START; }
+				} else if (num_args == 2) {
+					arg2 = strtol(token, &parse_err, 10);
+					if (*parse_err != 0 && !isspace(*parse_err)) { printf("couldn't parse second number!\n"); goto DEBUG_START; }
+				} else {
+					num_args ++;
+					break;
+				}
+				token = strtok(NULL, " ");
+				num_args ++;
+			}
+
+			switch (debug_op) {
+				case 'p':
+					printf("\treg:    %d\n", reg);
+					printf("\tindex:  %ld\n", index - tape - INITIAL_INDEX);
+					printf("\ttape [%ld to %ld]: [", index - tape - 10 - INITIAL_INDEX, index - tape + 10 - INITIAL_INDEX);
+					for (int i = 10; i > 0; i --) 
+						printf("%d, ", *(index - i));
+					printf("< %d >, ", *index);
+					for (int i = 1; i < 10; i ++) 
+						printf("%d, ", *(index + i));
+					printf("%d", *(index + 10));
+					printf("]\n");
+
+					for (int i = -5; i <= 5; i++) {
+						if (last_pc - opcodes + i < 0) { continue; }
+						if (last_pc - opcodes + i >= num_opcodes) { continue; }
+						char* co = print_instruction(last_pc + i);
+						if (i == 0) {
+							printf("\x1b[0m\x1b[42m");
+						}
+						printf("%5ld: %s", last_pc - opcodes + i, co);
+						if (i == 0) {
+							printf("\x1b[0m\x1b[32m");
+						}
+						printf("\n");
+						free(co);
+					}
+					break;
+				case 'r':
+					if (num_args == 2) {
+
+					} else {
+						printf("2 or 3 arguments needed!\n");
+					}
+					break;
+				case 'w':
+					if (num_args != 3) {
+						printf("2 arguments needed!\n");
+						break;
+					}
+					tape[INITIAL_INDEX + arg1] = arg2;
+					printf("WRITTEN %d [%c] TO t[%d]\n", arg2, arg2, arg1);
+					break;
+				case 's':
+				case '\n':
+					debug_counter = num_args == 2 ? arg1 : 1;
+					printf("STEP %d\x1b[0m\n", debug_counter);
+					goto QUIT_DEBUG;
+				case 'q':
+					debug_counter = -1;
+					printf("EXIT DEBUG\x1b[0m\n");
+					goto QUIT_DEBUG;
+				default:
+					printf("Unknown debug op\n Use p to print an overview\n     r <range>     to read parts of the tape\n     w <to> <val>  to write a value to the tape\n     s <n>         to step n steps\n");
+					break;
+			}
+		} while (1);
+	QUIT_DEBUG:
+		if (pc->op == DEBUG_BREAK)
+			pc += 1;
+		DISPATCH;
+#endif /* ifdef ENABLE_DEBUGGER */
 }
 
 void magic_number_check(FILE* fd) {
@@ -250,6 +506,76 @@ ParsedOpcode* read_opcodes(FILE* fd, size_t* num_opcodes) {
 	return opcodes;
 }
 
+char* print_instruction(ParsedOpcode* op) {
+	char* buffer = malloc(64);
+	switch (op->op) {
+		case ADD_CONST:
+			sprintf(buffer, "ADD_CONST       /     t[%d] += %d;", op->l, op->b);
+			break;
+		case SET_CONST:
+			sprintf(buffer, "SET_CONST       /     t[%d]  = %d;", op->l, op->b);
+			break;
+		case MUL_CONST:
+			sprintf(buffer, "MUL_CONST       /     t[%d] *= %d;", op->l, op->b);
+			break;
+		case LABEL:
+			sprintf(buffer, "LABEL           / label %d;", op->l);
+			break;
+		case J:
+			sprintf(buffer, "J               /     j %d;", op->l);
+			break;
+		case JEZ:
+			sprintf(buffer, "JEZ             /     jez %d;", op->l);
+			break;
+		case JNEZ:
+			sprintf(buffer, "JNEZ            /     jnez %d;", op->l);
+			break;
+		case JNEZ_SHIFT:
+			sprintf(buffer, "JNEZ_SHIFT      /     t += %d; jnez %d;", op->s, op->l);
+			break;
+		case WRITE:
+			sprintf(buffer, "WRITE           /     putchar(t[%d]);", op->l);
+			break;
+		case READ:
+			sprintf(buffer, "READ            /     t[%d] = getchar();", op->l);
+			break;
+		case SHIFT:
+			sprintf(buffer, "SHIFT           /     t += %d;", op->l);
+			break;
+		case SHIFT_BIG:
+			sprintf(buffer, "SHIFT_BIG       /     t += %d * 32768;", op->l);
+			break;
+		case LOAD:
+			sprintf(buffer, "LOAD            /     r = t[%d];", op->l);
+			break;
+		case LOAD_SWAP:
+			sprintf(buffer, "LOAD_SWAP       /     r, t[%d] = t[%d], r;", op->l, op->l);
+			break;
+		case SWAP:
+			sprintf(buffer, "SWAP            /     t[%d], t[%d] = t[%d], t[%d];", op->l, op->l + op->s, op->l + op->s, op->l);
+			break;
+		case ADD_CELL:
+			sprintf(buffer, "ADD_CELL        /     t[%d] += t[%d];", op->l, op->l + op->s);
+			break;
+		case ADDN_SET0:
+			sprintf(buffer, "ADDN_SET0       /     t[%d] += t[%d]; t[%d] = 0;", op->l, op->l + op->s, op->l + op->s);
+			break;
+		case SUB_CELL:
+			sprintf(buffer, "SUB_CELL        /     t[%d] -= t[%d];", op->l, op->l + op->s);
+			break;
+		case ADD_MUL:
+			sprintf(buffer, "ADD_MUL         /     t[%d] += %d * t[%d];", op->l, op->b, op->l + op->s);
+			break;
+		case DEBUG_BREAK:
+			sprintf(buffer, "DEBUG_BREAK  !!!");
+			break;
+		case SKIP_LOOP:
+			sprintf(buffer, "SKIP_LOOP       /     while (t[0]) { t += %d }", op->l);
+			break;
+	}
+	return buffer;
+}
+
 int main(int argc, char** argv) {
 	if (argc < 2) {
 		perror("missing filename");
@@ -265,17 +591,71 @@ int main(int argc, char** argv) {
 	size_t num_opcodes = 0;
 	ParsedOpcode* opcodes = read_opcodes(fd, &num_opcodes);
 	fclose(fd);
+
 	run_bytecode(opcodes, num_opcodes);
 	
-	printf("JNEZ Success: %d\nJNEZ Fail: %d\nJEZ Success: %d\nJEZ Fail: %d\n", profile_jnez_true, profile_jnez_false, profile_jez_true, profile_jez_false);
-	for (int i = 0; i < MARK_EOF; i++) {
-		printf("%s: %d\n", opnames[i], profile_inst_type[i]);
+#ifdef PROFILE_ALL
+	for (int i = 0; i < num_opcodes; i++) {
+		char* inst = print_instruction(&opcodes[i]);
+		char* col = get_grad(profile_inst[i] >> 2);
+		printf("%5d: %-64s  -> #%s%d\x1b[0m\n", i, inst, col, profile_inst[i]);
+		free(inst);
+		free(col);
 	}
-
-	for (int i = 0; i < 256; i++) {
-		if (profile_factor[i] != 0) {
-			printf("%d:\t %d\n", i, profile_factor[i]);
+	for (int i = 0; i < MARK_EOF; i++) {
+		char* col = get_grad_factor(profile_inst_type[i] >> 20, 2);
+		printf("%-15s: %s%d\x1b[0m\n", opnames[i], col, profile_inst_type[i]);
+		free(col);
+		if (i == ADD_MUL) {
+			for (int i = 0; i < 256; i++) {
+				if (profile_add_mul[i] != 0) {
+					char* col = get_grad(profile_inst_type[i] >> 4);
+					printf("\t%5d:\t %s%d\x1b[0m\n", i, col, profile_add_mul[i]);
+					free(col);
+				}
+			}
+		} else if (i == SET_CONST) {
+			for (int i = 0; i < 256; i++) {
+				if (profile_set_const[i] != 0) {
+					char* col = get_grad(profile_inst_type[i] >> 4);
+					printf("\t%5d:\t %s%d\x1b[0m\n", i, col, profile_set_const[i]);
+					free(col);
+				}
+			}
+		} else if (i == ADD_CONST) {
+			for (int i = 0; i < 256; i++) {
+				if (profile_add_const[i] != 0) {
+					char* col = get_grad(profile_inst_type[i] >> 4);
+					printf("\t%5d:\t %s%d\x1b[0m\n", i, col, profile_add_const[i]);
+					free(col);
+				}
+			}
+		} else if (i == JNEZ) {
+			printf("\tJNEZ Success: %d\n\tJNEZ Fail: %d\n", profile_jnez_true, profile_jnez_false);
+		} else if (i == JEZ) {
+			printf("\tJEZ Success: %d\n\tJEZ Fail: %d\n", profile_jez_true, profile_jez_false);
+		} else if (i == JNEZ_SHIFT) {
+			printf("\tJNEZ SHIFT Success: %d\n\tJNEZ SHIFT Fail: %d\n", profile_jnezs_true, profile_jnezs_false);
 		}
 	}
+
+	printf("from / to   ");
+	for (int i = 0; i < SKIP_LOOP; i++)
+		printf("%10s", opnames[i]);
+	printf("\n");
+	for (int i = 0; i < SKIP_LOOP; i++) {
+		printf("%-8s:", opnames[i]);
+		for (int j = 0; j < SKIP_LOOP; j++) {
+			int val = profile_from_to[i][j];
+			char* col = get_grad_factor(val>>10, 1.1);
+			printf("%s%10d\x1b[0m", col, val);
+			free(col);
+		}
+		printf("\n");
+	}
+	printf("\n");
+#endif /* ifdef PROFILE_ALL */
+
+
 	return 0;
 }

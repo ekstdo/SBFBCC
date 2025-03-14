@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, BTreeSet}, hash::Hash, num::Wrapping};
+use std::{collections::{BTreeMap, BTreeSet, HashSet}, hash::Hash, num::Wrapping};
 
 use crate::utils::{multinv, shift_bmap, swap_entries, w8, w8div, w8inv, BTreeZipAnd, BTreeZipOr, One, Zero};
 
@@ -21,6 +21,10 @@ impl<K: Copy + Eq + Ord + Hash> Permutation<K> {
         if self.inner.get(&row2) == Some(&row2) {
             self.inner.remove(&row2);
         }
+    }
+
+    pub fn cleanup(&mut self) {
+        self.inner.retain(|k, v| k != v);
     }
 
     pub fn reverse(&self) -> Permutation<K> {
@@ -49,6 +53,25 @@ impl<K: Copy + Eq + Ord + Hash> Permutation<K> {
                 tmp_v = self.inner[&tmp_v];
             }
         }
+    }
+
+    pub fn cycles(&self) -> Vec<Vec<K>> {
+        let mut swapped: HashSet<&K> = HashSet::new();
+        let mut cyc = Vec::new();
+        for (k, mut v) in &self.inner {
+            if swapped.contains(&k) {
+                continue;
+            }
+            swapped.insert(k);
+            let mut cycle = vec![k.clone()];
+            while !swapped.contains(v) {
+                swapped.insert(v);
+                cycle.push(v.clone());
+                v = &self.inner[v];
+            }
+            cyc.push(cycle);
+        }
+        cyc
     }
 }
 
@@ -520,7 +543,10 @@ impl Matrix {
     }
 
     pub fn to_opcode(self) -> (Permutation<isize>, Vec<MatOpCode>) {
-        let (p, l, u) = self.plu();
+        let (mut p, mut l, mut u) = self.plu();
+        p.cleanup();
+        l.optimize_all();
+        u.optimize_all();
         let mut u_op = u.u_op();
         let l_op = l.l_op();
         u_op.extend(l_op.iter().cloned());

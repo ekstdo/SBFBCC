@@ -89,7 +89,9 @@ easily apply this optimization, by checking whether `OffsetMap o` is followed by
 and removing the `index` row from `o` (as the rows in a matrix determine the result of that entry).
 
 
-### Branch followed by a sure 0
+### Simple Constant propagation 
+
+We can collect constant terms (i.e. OffsetMaps with zero rows (not empty, as empty would mean identity) and some affine value) and propagate them through the program.
 
 If a branch `Branch(inner, preshift, postshift)` is followed by
 
