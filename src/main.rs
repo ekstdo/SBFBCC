@@ -75,7 +75,7 @@ pub trait BFAffineT<T: Copy + Ord>: Sized {
         if v.0 == 0 { return; }
         let mut tmp = Self::new_ident();
         tmp.add_mul_raw(dest, src, v);
-        self.matmul(&mut tmp);
+        *self = self.matmul(&tmp);
     }
     fn set_mul(&mut self, dest: T, src: T, v: w8) {
         self.set_zero(dest);
@@ -198,11 +198,11 @@ impl BFAffineT<isize> for BFAddMap {
     }
 
     fn is_affine_zero_lin(&self, i: isize) -> bool {
-        self.matrix.get(i, i) == w8::ZERO && self.matrix.inner.get(&i).map_or(false, |x| x.values().all(|x| *x == w8::ZERO))
+        self.matrix.get(i, i) == w8::ZERO && self.matrix.inner.get(&i).is_some_and(|x| x.values().all(|x| *x == w8::ZERO))
     }
 
     fn set_constants(&mut self, consts: &BTreeMap<isize, w8>, diag0: bool) -> bool {
-        println!("{:?}", consts);
+        // println!("{:?}", consts);
         let diffs = self.matrix.vecmul(consts);
         for k in consts.keys() {
             self.matrix.rm_column(*k);
@@ -245,7 +245,7 @@ impl BFAffineT<isize> for BFAddMap {
 
     fn constants(&self, constants_so_far: &BTreeMap<isize, w8>) -> (BTreeMap<isize, w8>, BTreeSet<isize>) {
         let (zero_rows, mut non_zero_rows) = self.matrix.zero_rows(constants_so_far);
-        let res = self.matrix.vecmul(&constants_so_far);
+        let res = self.matrix.vecmul(constants_so_far);
         let mut constants = BTreeMap::new();
         for (k, v) in &self.affine {
             if zero_rows.contains(k) {
@@ -508,7 +508,7 @@ int main() {{
 // where } jumps to the innermost [ only
 //
 // The jez [ is still required though
-fn gen_opcode<T: BFAffineT<isize> + Clone + Debug>(optree: &Vec<Optree<T>>) -> Vec<Opcode> {
+fn gen_opcode<T: BFAffineT<isize> + Clone + Debug>(optree: &[Optree<T>]) -> Vec<Opcode> {
     let mut result = Vec::new();
 
     let mut stack = optree.iter().rev().collect::<Vec<_>>();
@@ -548,13 +548,12 @@ fn gen_opcode<T: BFAffineT<isize> + Clone + Debug>(optree: &Vec<Optree<T>>) -> V
             },
             Optree::DebugBreakpoint(_) => result.push(Opcode::DebugBreakpoint),
             Optree::Output(i, _) => result.push(Opcode::Write(*i as i32)),
-            Optree::OffsetMap(m, _) => result.extend(m.clone().to_opcode().into_iter()),
-            // TODO
-            Optree::Branch { instructions, preshift, itershift, jumpback, pos } => {
+            Optree::OffsetMap(m, _) => result.extend(m.clone().to_opcode()),
+            Optree::Branch { instructions, preshift, itershift, jumpback, pos: _ } => {
                 if *preshift != 0 {
                     result.push(Opcode::Shift(*preshift as i32));
                 }
-                if instructions.len() == 0 {
+                if instructions.is_empty() {
                     result.push(Opcode::SkipLoop(*itershift as i32));
                 } else {
                     result.push(Opcode::Jez((label_counter << 1) + 1));
@@ -842,7 +841,7 @@ pub fn optimize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Opt
     }
 }
 
-fn shift_along<T: BFAffineT<isize> + std::fmt::Debug>(o: &mut Vec<Optree<T>>, by: isize, starting_at: usize) -> isize {
+fn shift_along<T: BFAffineT<isize> + std::fmt::Debug>(o: &mut [Optree<T>], by: isize, starting_at: usize) -> isize {
     if by != 0 {
         let mut j = starting_at;
         while j < o.len() && o[j].shift(by) {
@@ -965,11 +964,11 @@ pub fn constant_propagate<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &m
     };
 
 
-    println!("{:?}", unoptimized);
+    // println!("{:?}", unoptimized);
     let mut index = 0;
     while index < unoptimized.len() {
         let el = &mut unoptimized[index];
-        println!("{:?} -> {:?}", result.constants, el);
+        // println!("{:?} -> {:?}", result.constants, el);
         match el {
             Optree::OffsetMap(bfaddmap, _) => {
                 // setting it to true may make things slower, unless you follow it up with other
@@ -981,7 +980,7 @@ pub fn constant_propagate<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &m
                 result.constants.retain(|x, _| !to_be_removed.contains(x));
                 to_be_inserted.into_iter().for_each(|(k ,v)| {result.constants.insert(k ,v);});
             },
-            Optree::Input(i, _) => { result.constants.remove(&i); },
+            Optree::Input(i, _) => { result.constants.remove(i); },
             Optree::Output(_, _) => {},
             Optree::Branch { preshift, .. } if result.constants.get(preshift) == Some(&w8::ZERO) => {
                 let preshift = *preshift;
@@ -1006,7 +1005,7 @@ pub fn constant_propagate<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &m
         index += 1;
     }
 
-    println!("OK!");
+    // println!("OK!");
     result
 
 }
@@ -1151,17 +1150,14 @@ fn optout_labels(opcode: &mut Vec<Opcode>, add1: bool) {
     let mut label_count = Vec::new(); // counts the amount of labels before that label
     let mut counter = 0;
     for (index, i) in opcode.iter().enumerate() {
-        match i {
-            Opcode::Label(k) => {
-                counter += 1;
-                while label_map.len() <= *k as usize {
-                    label_map.push(0);
-                    label_count.push(0);
-                }
-                label_map[*k as usize] = index;
-                label_count[*k as usize] = counter;
-            },
-            _ => {}
+        if let Opcode::Label(k) = i {
+            counter += 1;
+            while label_map.len() <= *k as usize {
+                label_map.push(0);
+                label_count.push(0);
+            }
+            label_map[*k as usize] = index;
+            label_count[*k as usize] = counter;
         }
     }
 
@@ -1174,10 +1170,10 @@ fn optout_labels(opcode: &mut Vec<Opcode>, add1: bool) {
         }
     }
 
-    opcode.retain(|x| match x { Opcode::Label(_) => false, _ => true });
+    opcode.retain(|x| !matches!(x, Opcode::Label(_)));
 }
 
-fn simulate(mut opcode: Vec<Opcode>) {
+fn simulate(mut opcode: Vec<Opcode>) -> Result<(), std::io::Error> {
     let mut tape: Vec<w8> = vec![w8::ZERO;u16::MAX as usize];
     let mut index = i16::MAX as usize;
     let mut pc = 0;
@@ -1186,7 +1182,7 @@ fn simulate(mut opcode: Vec<Opcode>) {
 
     optout_labels(&mut opcode, false);
 
-    let Some(mut last_op) = opcode.first() else {return;};
+    let Some(mut last_op) = opcode.first() else {return Ok(());};
     let mut print_buffer = String::new();
     while let Some(op) = opcode.get(pc) {
         match op {
@@ -1211,14 +1207,10 @@ fn simulate(mut opcode: Vec<Opcode>) {
             },
             Opcode::MulConst(val, to) => {tape[(index as isize + *to as isize) as usize] *= *val;},
             Opcode::LoadSwap(from) => {
-                let tmp = reg;
-                reg = tape[(index as isize + *from as isize) as usize];
-                tape[(index as isize + *from as isize) as usize] = tmp;  },
-
+                std::mem::swap(&mut reg, &mut tape[(index as isize + *from as isize) as usize]);  },
             Opcode::Swap(offset, from) => {
-                let tmp = tape[(index as isize + *from as isize + *offset as isize) as usize];
-                tape[(index as isize + *from as isize + *offset as isize) as usize] = tape[(index as isize + *from as isize) as usize];
-                tape[(index as isize + *from as isize) as usize] = tmp;  },
+                tape.swap((index as isize + *from as isize + *offset as isize) as usize, (index as isize + *from as isize + *offset as isize) as usize);
+            }
             Opcode::Load(from) => { reg = tape[(index as isize + *from as isize) as usize]; },
             Opcode::ShiftBig(_) => todo!(),
             Opcode::Shift(by) => {index = (index as isize + *by as isize) as usize;},
@@ -1254,7 +1246,7 @@ fn simulate(mut opcode: Vec<Opcode>) {
             print_buffer.clear();
             loop {
                 print!("\x1B[32mDEBUG[{}@ {}] > ", pc, format!("{}", last_op).trim());
-                std::io::stdout().flush();
+                std::io::stdout().flush()?;
                 line.clear();
                 std::io::stdin().read_line(&mut line).expect("FAILED TO READ LINE!");
 
@@ -1331,6 +1323,7 @@ fn simulate(mut opcode: Vec<Opcode>) {
         pc += 1;
         debug_counter -= 1;
     }
+    Ok(())
 }
 
 
@@ -1423,22 +1416,22 @@ fn simulate(mut opcode: Vec<Opcode>) {
 //   an entire copy of the .bf source code
 //
 //
-pub fn write_opcode<P: AsRef<Path>>(opcodes: &Vec<Opcode>, file_path: P) -> Result<(), std::io::Error> {
+pub fn write_opcode<P: AsRef<Path>>(opcodes: &[Opcode], file_path: P) -> Result<(), std::io::Error> {
     let mut file = std::fs::OpenOptions::new()
-        .create(true)
+        .create(true).truncate(true)
         .write(true)
         .open(file_path)?;
-    let v: Vec<u64> = opcodes.iter().map(|x| u64::from(x)).collect();
+    let v: Vec<u64> = opcodes.iter().map(u64::from).collect();
     let v_bytes = unsafe {
         v.align_to::<u8>().1
     };
     let magic_numbers = 0x627261696e66636bu64; // brainfck
     file.write_all(&magic_numbers.to_ne_bytes())?;
-    file.write_all(&v_bytes)?;
+    file.write_all(v_bytes)?;
     Ok(())
 }
 
-pub fn main() {
+pub fn main() -> Result<(), std::io::Error> {
 
     let args: Vec<String> = env::args().collect();
 
@@ -1458,13 +1451,14 @@ pub fn main() {
     let mut optimized_opcodes = gen_opcode(&tree);
     optout_labels(&mut optimized_opcodes, true);
     println!("// {} opcodes", optimized_opcodes.len());
-    write_opcode(&optimized_opcodes, Path::new(file_path).with_extension("lbf"));
-    for (index, i) in optimized_opcodes.iter().enumerate() {
-        println!("{}: {}", index, i);
-    }
-    println!("end of rust part");
+    write_opcode(&optimized_opcodes, Path::new(file_path).with_extension("lbf"))?;
+    // for (index, i) in optimized_opcodes.iter().enumerate() {
+    //     println!("{}: {}", index, i);
+    // }
+    println!("// end of rust part");
     // simulate(optimized_opcodes);
-    // println!("{}", gen_ccode(&tree));
+    println!("{}", gen_ccode(&tree));
+    Ok(())
 }
 
 #[cfg(test)]
