@@ -1,4 +1,3 @@
-#![feature(trait_alias)]
 use std::ops::{Add, Div, Index, Sub, Rem, Mul};
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::num::Wrapping;
@@ -279,10 +278,8 @@ impl<T:One> One for Wrapping<T> {
     const ONE: Self = Wrapping(T::ONE);
 }
 
-trait Num<T> = Add<Output=T> + Sub<Output=T> + Mul<Output=T> + Div<Output=T> + Rem<Output=T> + Clone + PartialOrd + Zero + One;
-
 pub fn eeagcd<T>(mut a: T, mut b: T) -> (T, T, T, T, T)
-where T: Num<T> {
+where T: Add<Output=T> + Sub<Output=T> + Mul<Output=T> + Div<Output=T> + Rem<Output=T> + Clone + PartialOrd + Zero + One + Copy {
     let (mut x, mut v, mut y, mut u) = (T::ONE, T::ONE, T::ZERO, T::ZERO);
     while b != T::ZERO {
         let q = a.clone() / b.clone();
@@ -292,7 +289,7 @@ where T: Num<T> {
 }
 
 pub fn multinv<T>(a: T, n: T) -> T
-where T: Add<Output=T> + Sub<Output=T> + Mul<Output=T> + Div<Output=T> + Rem<Output=T> + Copy + PartialOrd + Zero + One {
+where T: Add<Output=T> + Sub<Output=T> + Mul<Output=T> + Div<Output=T> + Rem<Output=T> + Clone + PartialOrd + Zero + One + Copy {
     eeagcd(a, n).1 % n
 }
 

@@ -1,5 +1,4 @@
 // Brainfuck bytecode compiler by ekstdo
-#![feature(trait_alias)]
 #![allow(non_camel_case_types)]
 use std::env;
 use std::fmt::Debug;
@@ -55,7 +54,7 @@ pub trait BFAffineT<T: Copy + Ord>: Sized {
     // after the operation to 0, for [-] and [+] and [+++] etc.
     fn set_zero(&mut self, i: T);
     fn set_constants(&mut self, consts: &BTreeMap<T, w8>, set_0_diag: bool) -> bool;
-    fn rm_row(&mut self, i: T);
+    fn rm_row(&mut self, i: T) -> bool; // returns true on changed
     fn set_const(&mut self, i: T, v: w8) {
         self.set_zero(i);
         self.add_const(i, v);
@@ -229,9 +228,11 @@ impl BFAffineT<isize> for BFAddMap {
         result
     }
 
-    fn rm_row(&mut self, i: isize) {
-        self.affine.remove(&i);
-        self.matrix.inner.remove(&i);
+    fn rm_row(&mut self, i: isize) -> bool {
+        let mut changed = false;
+        changed =  self.affine.remove(&i).is_some() || changed;
+        changed = self.matrix.inner.remove(&i).is_some() || changed;
+        changed
     }
 
     fn is_sure_ident(&self, i: isize) -> bool {
@@ -854,7 +855,7 @@ fn shift_along<T: BFAffineT<isize> + std::fmt::Debug>(o: &mut Vec<Optree<T>>, by
     0
 }
 
-struct LinearizationOutput {
+pub struct LinearizationOutput {
     changed: bool,
     resulting_shift: isize,
 }
@@ -887,9 +888,7 @@ pub fn linearize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Op
                 if let Some(Optree::Input(into, _)) = next_el {
                     let into = *into;
                     let Some(Optree::OffsetMap(ref mut bfaddmap, _)) = unoptimized.get_mut(index) else {panic!("wrong check!")};
-                    bfaddmap.rm_row(into);
-
-                    result.changed = true;
+                    result.changed = bfaddmap.rm_row(into) || result.changed;
                 }
             },
             // see 1.
@@ -952,7 +951,7 @@ pub fn linearize<T: BFAffineT<isize> + std::fmt::Debug>(unoptimized: &mut Vec<Op
     result
 }
 
-struct ConstantPropagationOutput {
+pub struct ConstantPropagationOutput {
     changed: bool,
     resulting_shift: isize,
     constants: BTreeMap<isize, w8>
