@@ -478,7 +478,7 @@ fn gen_ccode_op<T: BFAffineT<isize> + Clone + Debug>(optree: &Optree<T>, indent_
             result
 
         },
-        Optree::DebugBreakpoint(_) => todo!(),
+        Optree::DebugBreakpoint(_) => {String::new()},
     }
 }
 
@@ -508,11 +508,11 @@ int main() {{
 // where } jumps to the innermost [ only
 //
 // The jez [ is still required though
-fn gen_opcode<T: BFAffineT<isize> + Clone + Debug>(optree: &[Optree<T>]) -> Vec<Opcode> {
+fn gen_opcode<T: BFAffineT<isize> + Clone + Debug>(optree: &[Optree<T>]) -> (Vec<Opcode>, Vec<DebugPosition>) {
     let mut result = Vec::new();
 
     let mut stack = optree.iter().rev().collect::<Vec<_>>();
-    let mut jmp_stack: Vec<(usize, u32, i32, bool)> = Vec::new();
+    let mut jmp_stack: Vec<(usize, u32, i32, bool, &DebugPosition)> = Vec::new();
     let mut debug_result = Vec::new();
     let mut label_counter: u32 = 0;
     let mut i16_offset: usize = 0;
@@ -520,18 +520,23 @@ fn gen_opcode<T: BFAffineT<isize> + Clone + Debug>(optree: &[Optree<T>]) -> Vec<
     let mut max_i16: isize = i16::MAX as isize;
     let check_in_range = |x: isize| min_i16 <= x && x <= max_i16;
     loop {
-        while let Some((when_len, cur_label_counter, shift, jumpback)) = jmp_stack.last() {
+        while let Some((when_len, cur_label_counter, shift, jumpback, ref pos)) = jmp_stack.last() {
+            let pos = *pos;
             if *when_len == stack.len() {
                 if *jumpback {
                     if *shift != 0 {
                         result.push(Opcode::JnezShift(*shift as i16, *cur_label_counter << 1));
+                        debug_result.push(pos.clone());
                     } else {
                         result.push(Opcode::Jnez(*cur_label_counter << 1));
+                        debug_result.push(pos.clone());
                     }
                 } else if *shift != 0 {
                     result.push(Opcode::Shift(*shift));
+                    debug_result.push(pos.clone());
                 }
                 result.push(Opcode::Label((*cur_label_counter << 1) + 1u32));
+                debug_result.push(pos.clone());
                 jmp_stack.pop();
             } else {
                 break;
@@ -544,30 +549,46 @@ fn gen_opcode<T: BFAffineT<isize> + Clone + Debug>(optree: &[Optree<T>]) -> Vec<
             // todo: Check for i32 precision loss from isize
             Optree::Input(i, pos) => {
                 result.push(Opcode::Read(*i as i32));
-                debug_result.push(Opcode::DebugData(1, 1, 1, pos.start_line as u16, pos.start_col as u16))
-            },
-            Optree::DebugBreakpoint(_) => result.push(Opcode::DebugBreakpoint),
-            Optree::Output(i, _) => result.push(Opcode::Write(*i as i32)),
-            Optree::OffsetMap(m, _) => result.extend(m.clone().to_opcode()),
-            Optree::Branch { instructions, preshift, itershift, jumpback, pos: _ } => {
+                debug_result.push(pos.clone());
+            }
+            Optree::DebugBreakpoint(pos) => {
+                result.push(Opcode::DebugBreakpoint);
+                debug_result.push(pos.clone());
+            }
+            Optree::Output(i, pos) => {
+                result.push(Opcode::Write(*i as i32));
+                debug_result.push(pos.clone());
+            }
+            Optree::OffsetMap(m, pos) => {
+                let opcodes = m.clone().to_opcode();
+                for i in 0..opcodes.len() {
+                    debug_result.push(pos.clone());
+                }
+                result.extend(opcodes);
+            }
+            Optree::Branch { instructions, preshift, itershift, jumpback, pos } => {
                 if *preshift != 0 {
                     result.push(Opcode::Shift(*preshift as i32));
+                    debug_result.push(pos.clone());
                 }
                 if instructions.is_empty() {
                     result.push(Opcode::SkipLoop(*itershift as i32));
+                    debug_result.push(pos.clone());
                 } else {
                     result.push(Opcode::Jez((label_counter << 1) + 1));
+                    debug_result.push(pos.clone());
                     result.push(Opcode::Label(label_counter << 1));
+                    debug_result.push(pos.clone());
                     // when to insert the jump, where to jump to and how much to shift at each
                     // iteration
-                    jmp_stack.push((stack.len(), label_counter, *itershift as i32, *jumpback));
+                    jmp_stack.push((stack.len(), label_counter, *itershift as i32, *jumpback, pos));
                     stack.extend(instructions.iter().rev());
                     label_counter += 1;
                 }
             }
         }
     }
-    result
+    (result, debug_result)
 }
 
 impl<T: BFAffineT<isize> + std::fmt::Debug> Optree<T> {
@@ -590,23 +611,30 @@ impl<T: BFAffineT<isize> + std::fmt::Debug> Optree<T> {
 }
 
 
-pub fn compile<T: BFAffineT<isize>>(s: String) -> Vec<Optree<T>> {
+pub fn compile<T: BFAffineT<isize>>(s: &str) -> Vec<Optree<T>> {
     let mut inst = vec![vec![]];
     let mut current_inst = &mut inst[0];
     let mut current_offset_map = T::new_ident();
     let mut current_offset: isize = 0;
     let mut preshift = vec![0];
     let mut saved_pos: Vec<(usize, usize)> = vec![];
+    let mut last_add_pos = None;
+    let mut last_pos = (0, 0);
     let mut line = 0;
     let mut column = 0;
     for i in s.chars() {
         if "[].,".contains(i) && !current_offset_map.is_ident() {
-            let start_pos = saved_pos.pop().unwrap();
-            current_inst.push(Optree::OffsetMap(current_offset_map, DebugPosition { start_line: start_pos.0, start_col: start_pos.0, end_line: line, end_col: column }));
+            // println!("{:?}", last_add_pos);
+            let unwrapped_last_add_pos: (usize, usize) = last_add_pos.unwrap();
+            current_offset_map.cleanup();
+            current_inst.push(Optree::OffsetMap(current_offset_map, DebugPosition { start_line: unwrapped_last_add_pos.0, start_col: unwrapped_last_add_pos.1, end_line: last_pos.0, end_col: last_pos.1 }));
             current_offset_map = T::new_ident();
         }
-        if "+-<>".contains(i) && current_offset_map.is_ident() {
-            saved_pos.push((line, column));
+        if "[].,".contains(i) && last_add_pos.is_some() {
+            last_add_pos = None;
+        }
+        if "+-<>".contains(i) && last_add_pos.is_none() {
+            last_add_pos = Some((line, column));
         }
         match i {
             '+' => {
@@ -648,6 +676,8 @@ pub fn compile<T: BFAffineT<isize>>(s: String) -> Vec<Optree<T>> {
             _ => {}
         }
 
+
+        last_pos = (line, column);
         if i == '\n' {
             column = 0;
             line += 1;
@@ -1145,7 +1175,7 @@ impl std::fmt::Display for Opcode {
     }
 }
 
-fn optout_labels(opcode: &mut Vec<Opcode>, add1: bool) {
+fn optout_labels(opcode: &mut Vec<Opcode>, debug_symbols: Option<&mut Vec<DebugPosition>>, add1: bool) {
     let mut label_map = Vec::new(); // maps each label id to the index position
     let mut label_count = Vec::new(); // counts the amount of labels before that label
     let mut counter = 0;
@@ -1170,6 +1200,17 @@ fn optout_labels(opcode: &mut Vec<Opcode>, add1: bool) {
         }
     }
 
+    if let Some(debug_symbols ) = debug_symbols {
+        let mut new_debug_symbols = Vec::new();
+        let mut old_debug_symbols: Vec<DebugPosition> = Vec::new();
+        std::mem::swap(debug_symbols, &mut old_debug_symbols);
+        for (i, x) in old_debug_symbols.into_iter().enumerate() {
+            if !matches!(opcode[i], Opcode::Label(_)) {
+                new_debug_symbols.push(x);
+            }
+        }
+        *debug_symbols = new_debug_symbols;
+    };
     opcode.retain(|x| !matches!(x, Opcode::Label(_)));
 }
 
@@ -1180,7 +1221,7 @@ fn simulate(mut opcode: Vec<Opcode>) -> Result<(), std::io::Error> {
     let mut debug_counter = -1;
     let mut reg = w8::ZERO;
 
-    optout_labels(&mut opcode, false);
+    optout_labels(&mut opcode, None, false);
 
     let Some(mut last_op) = opcode.first() else {return Ok(());};
     let mut print_buffer = String::new();
@@ -1416,7 +1457,7 @@ fn simulate(mut opcode: Vec<Opcode>) -> Result<(), std::io::Error> {
 //   an entire copy of the .bf source code
 //
 //
-pub fn write_opcode<P: AsRef<Path>>(opcodes: &[Opcode], file_path: P) -> Result<(), std::io::Error> {
+pub fn write_opcode<P: AsRef<Path>>(opcodes: &[Opcode], debug_symbols: Option<(&[u64], &String)>, file_path: P) -> Result<(), std::io::Error> {
     let mut file = std::fs::OpenOptions::new()
         .create(true).truncate(true)
         .write(true)
@@ -1428,7 +1469,42 @@ pub fn write_opcode<P: AsRef<Path>>(opcodes: &[Opcode], file_path: P) -> Result<
     let magic_numbers = 0x627261696e66636bu64; // brainfck
     file.write_all(&magic_numbers.to_ne_bytes())?;
     file.write_all(v_bytes)?;
+    let magic_numbers = 0x1616161616161616u64; // MARK_EOF
+    file.write_all(&magic_numbers.to_ne_bytes())?;
+    if let Some((debug_symbols, source)) = debug_symbols {
+        let debug_bytes = unsafe { debug_symbols.align_to::<u8>().1 };
+        file.write_all(debug_bytes)?;
+        let magic_numbers = 0xFFFFFFFFFFFFFFFFu64; // -1
+        file.write_all(&magic_numbers.to_ne_bytes())?;
+        file.write_all(source.as_bytes())?;
+    }
     Ok(())
+}
+
+pub fn summarize_opcode_symbols(v: &Vec<DebugPosition>) -> Vec<u64> {
+    let index = 0;
+    let mut last_el = &v[index];
+    let mut result = Vec::new();
+    let mut counter = 0;
+
+    let conv = |x: &DebugPosition, n: usize| {
+        ((n as u64) << 48) 
+            | ((((x.end_line as isize - x.start_line as isize) as u8) as u64) << 40)
+            | ((((x.end_col as isize - x.start_col as isize) as u8) as u64) << 32)
+            | ((x.start_line as u64) << 16)
+            | (x.start_col as u64)
+    };
+    for el in v {
+        if el == last_el {
+            counter += 1;
+        } else {
+            result.push(conv(last_el, counter));
+            last_el = el;
+            counter = 1;
+        }
+    }
+    result.push(conv(last_el, counter));
+    result
 }
 
 pub fn main() -> Result<(), std::io::Error> {
@@ -1437,7 +1513,7 @@ pub fn main() -> Result<(), std::io::Error> {
 
     let file_path = args.get(1).expect("No filepath given!");
     let contents = fs::read_to_string(file_path).expect("File doesn't exist");
-    let mut tree = compile::<BFAddMap>(contents);
+    let mut tree = compile::<BFAddMap>(&contents);
 
     // println!("{:?}", &tree);
     // let opcodes = gen_opcode(&tree);
@@ -1448,16 +1524,17 @@ pub fn main() -> Result<(), std::io::Error> {
     // println!("after optimization:");
     // dbg!(&tree);
 
-    let mut optimized_opcodes = gen_opcode(&tree);
-    optout_labels(&mut optimized_opcodes, true);
+    let (mut optimized_opcodes, mut debug_positions) = gen_opcode(&tree);
+    optout_labels(&mut optimized_opcodes, Some(&mut debug_positions), true);
     println!("// {} opcodes", optimized_opcodes.len());
-    write_opcode(&optimized_opcodes, Path::new(file_path).with_extension("lbf"))?;
+    let out_debug = summarize_opcode_symbols(&debug_positions);
+    write_opcode(&optimized_opcodes, Some((&out_debug, &contents)), Path::new(file_path).with_extension("lbf"))?;
     // for (index, i) in optimized_opcodes.iter().enumerate() {
     //     println!("{}: {}", index, i);
     // }
     println!("// end of rust part");
     // simulate(optimized_opcodes);
-    println!("{}", gen_ccode(&tree));
+    // println!("{}", gen_ccode(&tree));
     Ok(())
 }
 
@@ -1484,7 +1561,7 @@ mod test {
     #[test]
     fn simple_compile(){
         let input = String::from("++++++++++>++++<<---<+.");
-        let tree = compile::<BFAddMap>(input);
+        let tree = compile::<BFAddMap>(&input);
         let matrix_: Matrix = Matrix::new();
         let affine_ = BTreeMap::from_iter([(-2, 1), (-1, (256 - 3) as u8), (0, 10), (1, 4)].into_iter().map(|(x, y)| (x, Wrapping(y))));
         match &tree[0] {
@@ -1500,7 +1577,7 @@ mod test {
     #[test]
     fn loop_compile(){
         let input = String::from(">>>[->>]>. [<<]");
-        let tree = compile::<BFAddMap>(input);
+        let tree = compile::<BFAddMap>(&input);
         dbg!(tree);
     }
 }

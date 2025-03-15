@@ -10,8 +10,8 @@
 #define HEADER 0x627261696e66636b
 #define INITIAL_BUFFER_SIZE 20
 
-/* #define PROFILE_ALL */
-#define ENABLE_DEBUGGER
+#define PROFILE_ALL
+/* #define ENABLE_DEBUGGER */
 
 
 
@@ -128,6 +128,7 @@ unsigned char colors[20][3] = {
 };
 
 #define MIN(x, y) (x > y ? y : x)
+#define MAX(x, y) (x > y ? x : y)
 
 char* get_grad_factor(int x, float factor){
 	unsigned char* col_this = colors[19-MIN((int) (num_bits(x) * factor), 20 - 1)];
@@ -162,7 +163,33 @@ int profile_from_to[MARK_EOF][MARK_EOF];
 
 #endif /* ifdef PROFILE_ALL */
 
-int run_bytecode(ParsedOpcode* opcodes, int num_opcodes) {
+
+
+typedef struct {
+	uint16_t start_col;
+	uint16_t start_line;
+	int8_t offset_col;
+	uint8_t offset_line;
+	uint16_t num;
+} ParseDebugPos;
+
+typedef struct {
+	ParsedOpcode* opcodes;
+	int num_opcodes;
+	ParseDebugPos* debug_pos; // list of Debug pos
+	int num_debug_pos;
+	ParseDebugPos** translated; // repeated pointers to Debug positions
+	char* src; // src code
+	char** lines; // src lines
+	size_t* line_lengths;
+	int num_lines;
+} ParseOutput;
+
+
+
+int run_bytecode(ParseOutput p) {
+	ParsedOpcode* opcodes = p.opcodes;
+	int num_opcodes = p.num_opcodes;
 	uint8_t* tape = mmap(NULL, U16MAX, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (tape == MAP_FAILED) {
 		perror("failed to allocate memory");
@@ -226,23 +253,20 @@ int run_bytecode(ParsedOpcode* opcodes, int num_opcodes) {
 
 	DISPATCH;
 
-	CASE_ADD_CONST:
+	CASE_ADD_CONST: PROFILE_INC(profile_add_const[pc->b]);
 		index[pc->l] += pc->b;
-		PROFILE_INC(profile_add_const[pc->b]);
 		PC(+= 1);
 		DISPATCH;
-	CASE_SET_CONST:
+	CASE_SET_CONST: PROFILE_INC(profile_set_const[pc->b]);
 		index[pc->l] = pc->b;
-		PROFILE_INC(profile_set_const[pc->b]);
 		PC(+= 1);
 		DISPATCH;
 	CASE_MUL_CONST:
 		index[pc->l] *= pc->b;
 		PC(+= 1);
 		DISPATCH;
-	CASE_ADD_MUL:
+	CASE_ADD_MUL: PROFILE_INC(profile_add_mul[pc->b]);
 		index[pc->l] += pc->b * index[pc-> l + pc->s];
-		PROFILE_INC(profile_add_mul[pc->b]);
 		PC(+= 1);
 		DISPATCH;
 	CASE_ADD_CELL:
@@ -369,6 +393,41 @@ int run_bytecode(ParsedOpcode* opcodes, int num_opcodes) {
 			free(co);
 		}
 
+		printf("\n\n");
+
+		ParseDebugPos* parsed_opcode = p.translated[last_pc - opcodes];
+		printf("RANGE: %d-%d, %d-%d\n", parsed_opcode->start_line, parsed_opcode->start_line + parsed_opcode->offset_line, parsed_opcode->start_col, parsed_opcode->start_col + parsed_opcode->offset_col);
+		size_t start_line_length = p.line_lengths[parsed_opcode->start_line];
+		size_t end_line = parsed_opcode->start_line + parsed_opcode->offset_line;
+		size_t end_line_length = p.line_lengths[parsed_opcode->start_line + parsed_opcode->offset_line];
+		size_t end_col = parsed_opcode->start_col + parsed_opcode->offset_col;
+		char* buffer = malloc(sizeof(char) * start_line_length);
+		strncpy(buffer, p.lines[parsed_opcode->start_line], parsed_opcode->start_col);
+		buffer[parsed_opcode->start_col] = '\0';
+		printf("%s\x1b[0m\x1b[42m", buffer);
+
+
+		if (parsed_opcode->offset_line == 0) {
+			strncpy(buffer, p.lines[parsed_opcode->start_line] + parsed_opcode->start_col, parsed_opcode->offset_col + 1);
+			buffer[parsed_opcode->offset_col+1] = '\0';
+			printf("%s", buffer);
+			printf("\x1b[0m\x1b[32m");
+			strcpy(buffer, p.lines[parsed_opcode->start_line] + end_col + 1);
+			printf("%s\n", buffer);
+		} else {
+			strcpy(buffer, p.lines[parsed_opcode->start_line] + parsed_opcode->start_col);
+			printf("%s\n", buffer);
+			for (uint16_t line = parsed_opcode->start_line + 1; line < parsed_opcode->start_line + parsed_opcode->offset_line; line++) {
+				printf("%s\n", p.lines[line]);
+			}
+			buffer = realloc(buffer, sizeof(char) * p.line_lengths[end_line]);
+			strncpy(buffer, p.lines[end_line], end_col);
+			buffer[end_col+1] = '\0';
+			printf("%s\x1b[0m\x1b[32m", buffer);
+			strcpy(buffer, p.lines[end_line] + end_col + 1);
+			printf("%s\n", buffer);
+		}
+
 		do {
 			char buffer[50];
 		DEBUG_START:
@@ -380,10 +439,10 @@ int run_bytecode(ParsedOpcode* opcodes, int num_opcodes) {
 			char debug_op;
 			int arg1;
 			int arg2;
-			char* token = strtok(buffer, " ");
+			
 			char* parse_err;
 
-			while (token != NULL) {
+			for (char* token = strtok(buffer, " "); token != NULL; token = strtok(NULL, " ")) {
 				if (num_args == 0) {
 					debug_op = token[0];
 				} else if (num_args == 1) {
@@ -396,38 +455,13 @@ int run_bytecode(ParsedOpcode* opcodes, int num_opcodes) {
 					num_args ++;
 					break;
 				}
-				token = strtok(NULL, " ");
+				
 				num_args ++;
 			}
 
 			switch (debug_op) {
 				case 'p':
-					printf("\treg:    %d\n", reg);
-					printf("\tindex:  %ld\n", index - tape - INITIAL_INDEX);
-					printf("\ttape [%ld to %ld]: [", index - tape - 10 - INITIAL_INDEX, index - tape + 10 - INITIAL_INDEX);
-					for (int i = 10; i > 0; i --) 
-						printf("%d, ", *(index - i));
-					printf("< %d >, ", *index);
-					for (int i = 1; i < 10; i ++) 
-						printf("%d, ", *(index + i));
-					printf("%d", *(index + 10));
-					printf("]\n");
-
-					for (int i = -5; i <= 5; i++) {
-						if (last_pc - opcodes + i < 0) { continue; }
-						if (last_pc - opcodes + i >= num_opcodes) { continue; }
-						char* co = print_instruction(last_pc + i);
-						if (i == 0) {
-							printf("\x1b[0m\x1b[42m");
-						}
-						printf("%5ld: %s", last_pc - opcodes + i, co);
-						if (i == 0) {
-							printf("\x1b[0m\x1b[32m");
-						}
-						printf("\n");
-						free(co);
-					}
-					break;
+					goto DEBUG;
 				case 'r':
 					if (num_args == 2) {
 
@@ -478,32 +512,100 @@ void magic_number_check(FILE* fd) {
 	}
 }
 
-ParsedOpcode* read_opcodes(FILE* fd, size_t* num_opcodes) {
-	ParsedOpcode* opcodes = malloc(sizeof(ParsedOpcode) * INITIAL_BUFFER_SIZE);
-	size_t capacity = INITIAL_BUFFER_SIZE;
-	size_t len = 0;
+
+
+int is_end_pos(ParseDebugPos* p) {
+	return p->start_col == 0xFFFF && p->start_line == 0xFFFF && (uint8_t) p->offset_col == 0xFF && p->offset_line == 0xFF && p->num == 0xFFFF;
+}
+
+#define INITIALIZE_BUFFER(x, type) type* x = malloc(sizeof(type) * INITIAL_BUFFER_SIZE); size_t x ## _capacity = INITIAL_BUFFER_SIZE; size_t num_ ## x = 0;
+#define DOUBLE_BUFFER(x, type) if (num_ ## x == x ## _capacity ) { x ## _capacity *= 2; x = realloc(x, sizeof(type) * x ## _capacity); }
+
+ParseOutput read_opcodes(FILE* fd) {
+
+	INITIALIZE_BUFFER(opcodes, ParsedOpcode);
 	while (!feof(fd)) {
-		if (len == capacity) {
-			opcodes = realloc(opcodes, sizeof(ParsedOpcode) * capacity * 2);
-			capacity *= 2;
+		DOUBLE_BUFFER(opcodes, ParsedOpcode);
+		int result = fread(opcodes + num_opcodes, sizeof(ParsedOpcode), 1, fd);
+
+		if (opcodes[num_opcodes].op == MARK_EOF) {
+			break;
 		}
-		int result = fread(opcodes + len, sizeof(ParsedOpcode), 1, fd);
 		if (result != 1) {
-			printf("incomplete opcode: %x\n",  opcodes[len]);
+			printf("incomplete opcode: %x\n",  opcodes[num_opcodes]);
 		} else {
-			len++;
+			num_opcodes++;
 		}
-	}
-	if (len == capacity) {
-		opcodes = realloc(opcodes, sizeof(ParsedOpcode) * capacity * 2);
-		capacity *= 2;
+
 	}
 
-	ParsedOpcode end = { .op = MARK_EOF };
-	opcodes[len] = end;
-	printf("read %zu opcodes in total\n", len);
-	*num_opcodes = len;
-	return opcodes;
+	INITIALIZE_BUFFER(debug_pos, ParseDebugPos);
+	num_debug_pos = 0;
+	INITIALIZE_BUFFER(translated, ParseDebugPos*);
+	num_translated = 0;
+	while (!feof(fd)) {
+		DOUBLE_BUFFER(debug_pos, ParseDebugPos);
+
+		int result = fread(debug_pos + num_debug_pos, sizeof(ParseDebugPos), 1, fd);
+		if (is_end_pos(debug_pos + num_debug_pos)) {
+			break;
+		}
+
+		if (result != 1) {
+			printf("incomplete debugcode: %x\n", debug_pos[num_debug_pos]);
+		} else {
+			num_debug_pos++;
+		}
+	}
+
+	for (size_t e = 0; e < num_debug_pos; e++){
+		for (int i = 0; i < debug_pos[e].num; i++) {
+			DOUBLE_BUFFER(translated, ParseDebugPos*);
+
+			translated[num_translated] = debug_pos + e;
+			num_translated++;
+		}
+	}
+
+
+	if (num_translated != num_opcodes) {
+		perror("Missing debug data!");
+		exit(1);
+	}
+
+	INITIALIZE_BUFFER(src, char);
+	while (!feof(fd)) {
+		DOUBLE_BUFFER(src, char);
+		fread(src + num_src, sizeof(char), 1, fd);
+		num_src++;
+	}
+
+	INITIALIZE_BUFFER(lines, char*);
+	INITIALIZE_BUFFER(line_lengths, size_t);
+	// inefficient, as it's being iterated 3 times
+	for (char* line = strtok(src, "\n"); line != NULL; line = strtok(NULL, "\n")) {
+		DOUBLE_BUFFER(lines, char*);
+		lines[num_lines++] = line;
+		DOUBLE_BUFFER(line_lengths, size_t);
+		line_lengths[num_line_lengths++] = strlen(line);
+	}
+
+
+
+
+	printf("read %zu opcodes in total\n", num_opcodes);
+	ParseOutput out = {
+		.opcodes = opcodes,
+		.num_opcodes = num_opcodes,
+		.num_debug_pos = num_debug_pos,
+		.num_lines = num_lines,
+		.translated = translated,
+		.src = src,
+		.lines = lines,
+		.debug_pos = debug_pos,
+		.line_lengths = line_lengths
+	};
+	return out;
 }
 
 char* print_instruction(ParsedOpcode* op) {
@@ -589,10 +691,16 @@ int main(int argc, char** argv) {
 
 	magic_number_check(fd);
 	size_t num_opcodes = 0;
-	ParsedOpcode* opcodes = read_opcodes(fd, &num_opcodes);
+	ParseOutput parsed = read_opcodes(fd);
 	fclose(fd);
 
-	run_bytecode(opcodes, num_opcodes);
+	run_bytecode(parsed);
+	free(parsed.translated);
+	free(parsed.debug_pos);
+	free(parsed.opcodes);
+	free(parsed.src);
+	free(parsed.lines);
+	free(parsed.line_lengths);
 	
 #ifdef PROFILE_ALL
 	for (int i = 0; i < num_opcodes; i++) {
