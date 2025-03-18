@@ -170,7 +170,7 @@ impl Matrix {
         entry.insert(column, value)
     }
 
-    pub fn optimize_all(&mut self) -> bool {
+    pub fn cleanup_all(&mut self) -> bool {
         let mut changed = false;
         for (&k, row) in self.inner.iter_mut() {
             row.retain(|&j, v| {
@@ -183,7 +183,7 @@ impl Matrix {
         changed
     }
 
-    pub fn optimize_row(&mut self, row_index: isize) -> bool {
+    pub fn cleanup_row(&mut self, row_index: isize) -> bool {
         let mut changed = false;
         if let Some(row) = self.inner.get_mut(&row_index) {
             row.retain(|&j, v| {
@@ -211,7 +211,7 @@ impl Matrix {
             // same thing, just the other way around
             row2_inner.entry(row2).or_insert(w8::ZERO);
         }
-        self.optimize_row(row2);
+        self.cleanup_row(row2);
         if let Some(row1_inner) = self.inner.get_mut(&row1) {
             // previously defaulted to 1, but it defaults to 0 now, so 
             // we need to set it to 1
@@ -219,11 +219,11 @@ impl Matrix {
             // same thing, just the other way around
             row1_inner.entry(row1).or_insert(w8::ZERO);
         }
-        self.optimize_row(row1);
+        self.cleanup_row(row1);
     }
 
     pub fn zero_row(&mut self, row_index: isize) {
-        let x = self.inner.entry(row_index).or_insert(BTreeMap::new());
+        let x = self.inner.entry(row_index).or_default();
         x.clear();
         x.insert(row_index, w8::ZERO);
 
@@ -324,48 +324,30 @@ impl Matrix {
     }
 
 
-    pub fn first_row_with_oddest_entry(&self, column: isize, starting_at: isize) -> Option<(isize, w8)> {
-        let default_identity = Some((column, w8::ONE));
-        if self.inner.is_empty() { // default is the identity
-            return default_identity;
-        }
-        let (&first_key, _) = self.inner.first_key_value().unwrap();
-        let (&last_key, _) = self.inner.last_key_value().unwrap();
-        // if column lies outside, default to identity
-        if (column < first_key && column >= starting_at) || starting_at > last_key  {
-            return default_identity;
-        }
-        // let mut candidate: Option<(isize, w8)> = None;
-        let mut candidates: Vec<(isize, w8)> = Vec::new();
-        let mut minimum_trailing_0 = u32::MAX;
-
-        if !self.inner.contains_key(&column) && column >= starting_at {
-            minimum_trailing_0 = 0;
-            candidates.push((column, w8::ONE)); // Identity is a possibility
-        }
-        for (&row_index, row) in self.inner.range(starting_at..) {
-            if let Some(&val) =  row.get(&column) {
-                if val == w8::ZERO {
-                    continue;
-                }
-
-                let val_t0 = val.0.trailing_zeros();
-
-                if val_t0 < minimum_trailing_0 {
-                    candidates = vec![(row_index, val)];
-                    minimum_trailing_0 = val_t0;
-                } else if val_t0 == minimum_trailing_0 {
-                    candidates.push((row_index, val));
-                }
-            } else if row_index == column { // identity entry by default
-                return default_identity;
+    // search for rows, where 
+    //
+    // - nothing depends on it (i.e. nothing occurs in their column, except their own row)
+    // - only depend on t[0], while every other entry is identity
+    //
+    // This assumes cleaned up matrix
+    pub fn squarable(&self) -> BTreeMap<isize, w8> {
+        let mut result = BTreeMap::new();
+        for (row_index, row) in &self.inner {
+            if row.contains_key(&0) && row.len() == 1 {
+                result.insert(*row_index, *row.get(&0).unwrap());
             }
         }
-        candidates.get(0).cloned()
+
+        for row in self.inner.values() {
+            for col in row.keys() {
+                result.remove(col);
+            }
+        }
+        result
     }
 
-    pub fn first_row_with_oddest_entry_opt(&self, column: isize, starting_at: isize) -> Option<(isize, w8)> {
-        let default_identity = Some((column, w8::ONE));
+    pub fn pivot_candidates(&self, column: isize, starting_at: isize) -> Vec<(isize, w8)> {
+        let default_identity = vec!((column, w8::ONE));
         if self.inner.is_empty() { // default is the identity
             return default_identity;
         }
@@ -375,7 +357,6 @@ impl Matrix {
         if (column < first_key && column >= starting_at) || starting_at > last_key  {
             return default_identity;
         }
-        // let mut candidate: Option<(isize, w8)> = None;
         let mut candidates: Vec<(isize, w8)> = Vec::new();
         let mut minimum_trailing_0 = u32::MAX;
 
@@ -401,13 +382,23 @@ impl Matrix {
                 return default_identity;
             }
         }
+        candidates
+    }
+
+    pub fn first_row_with_oddest_entry(&self, column: isize, starting_at: isize) -> Option<(isize, w8)> {
+        let candidates = self.pivot_candidates(column, starting_at);
+        candidates.first().cloned()
+    }
+
+    pub fn opt_row_with_oddest_entry(&self, column: isize, starting_at: isize) -> Option<(isize, w8)> {
+        let candidates = self.pivot_candidates(column, starting_at);
         let mut max_total_lin_comb = 0;
-        let mut max_candidate = candidates.get(0).cloned();
+        let mut max_candidate = candidates.first().cloned();
         for i in &candidates {
             let total_lin_comb = self.total_num_lin(i.0, starting_at);
             if total_lin_comb > 3 && total_lin_comb > max_total_lin_comb {
                 max_total_lin_comb = total_lin_comb;
-                max_candidate = Some(i.clone());
+                max_candidate = Some(*i);
             }
         }
         max_candidate
@@ -415,10 +406,10 @@ impl Matrix {
 
     pub fn check_plu_equiv(mat: &Matrix, p: &Permutation<isize>, l: &Matrix, u: &Matrix) -> bool {
         let mut mat_clone = mat.clone();
-        mat_clone.optimize_all();
+        mat_clone.cleanup_all();
         let mut lu = l.matmul(u);
         p.apply_matrix(&mut lu);
-        lu.optimize_all();
+        lu.cleanup_all();
         let result = mat_clone == lu;
         if !result {
             dbg!("LU: {:?}", lu);
@@ -464,7 +455,7 @@ impl Matrix {
             // representation!
 
             // check in which row this column exists
-            let Some((row, row_val)) = self.first_row_with_oddest_entry_opt(index, index) else {continue;};
+            let Some((row, row_val)) = self.opt_row_with_oddest_entry(index, index) else {continue;};
 
             if row != index {
                 self.swap_rows(row, index); // we swap the rows for U
@@ -506,7 +497,7 @@ impl Matrix {
         let mut result = Vec::new();
         for (&k, row) in &self.inner {
             for (&column, &val) in row {
-                if (k == column) {
+                if k == column {
                     result.push(MatOpCode::Mul(k, val));
                 } else {
                     result.push(MatOpCode::Add(k, column, val));
@@ -542,15 +533,46 @@ impl Matrix {
         result
     }
 
-    pub fn to_opcode(self) -> (Permutation<isize>, Vec<MatOpCode>) {
-        let (mut p, mut l, mut u) = self.plu();
-        p.cleanup();
-        l.optimize_all();
-        u.optimize_all();
-        let mut u_op = u.u_op();
-        let l_op = l.l_op();
-        u_op.extend(l_op.iter().cloned());
-        (p, u_op)
+
+
+    // checks if self is a l or a u matrix
+    pub fn check_lu_mat(&self) -> (bool, bool) {
+        let mut is_l = true;
+        let mut is_u = true;
+
+        for (row_index, row) in &self.inner {
+            for column_index in row.keys() {
+                if row_index < column_index {
+                    is_l = false;
+                }
+                if row_index > column_index {
+                    is_u = false;
+                }
+
+                if !(is_l || is_u) {
+                    return (is_l, is_u);
+                }
+            }
+        }
+        (is_l, is_u)
+    }
+
+    pub fn convert_to_opcode(self) -> (Permutation<isize>, Vec<MatOpCode>) {
+        let (is_l, is_u) = self.check_lu_mat();
+        if is_l {
+            (Permutation{inner: BTreeMap::new()}, self.l_op())
+        } else if is_u {
+            (Permutation{inner: BTreeMap::new()}, self.u_op())
+        } else {
+            let (mut p, mut l, mut u) = self.plu();
+            p.cleanup();
+            l.cleanup_all();
+            u.cleanup_all();
+            let mut u_op = u.u_op();
+            let l_op = l.l_op();
+            u_op.extend(l_op.iter().cloned());
+            (p, u_op)
+        }
     }
 
     pub fn transpose(&self) -> Matrix {
@@ -680,7 +702,7 @@ impl Matrix {
                 if v2.is_some() {
                     continue;
                 }
-                if (c == k || v1 != None) && v1 != Some(&w8::ZERO)  { // i.e. non-zero
+                if (c == k || v1.is_some()) && v1 != Some(&w8::ZERO)  { // i.e. non-zero
                     non_zero_rows.insert(*k);
                     zero_row = false;
                     break;
@@ -691,6 +713,48 @@ impl Matrix {
             }
         });
         (zero_rows, non_zero_rows)
+    }
+
+
+    // Returns Zero columns and non zero columns
+    // When Checking, which values A x + b reads, we require to know any columns in A.
+    // If i is a zero column in A, i is never read (as it's overwritten by b_i).
+    // If i is an identity column in A, i is only read if b_i != 0 (otherwise x_i = x_i + b_i reads
+    // x_i)
+    // otherwise x_i is read
+    //
+    // if we assume, that the matrix is already cleaned up, identity columns don't exist in the
+    // matrix (as they're the default). We therefore only need to check for a column, whether it's
+    // identity entry is zero or not
+    //
+    // If a column contains only 1 zero entry (in a cleaned up matrix), it can only be at the
+    // identity line. As soon as another row contains an entry in that column, it can't be zero (as
+    // we assume it's cleaned up)
+    //
+    // this function assumes cleaned up rows
+    pub fn zero_columns(&self) -> (BTreeSet<isize>, BTreeSet<isize>) {
+        let mut zero_columns = BTreeSet::new();
+        let mut other_columns = BTreeSet::new();
+
+        for (row_index, row) in &self.inner {
+            for (col_index, val) in row {
+                let is_zero = *val == w8::ZERO;
+                // it's already the biggest set
+                if other_columns.contains(col_index) { 
+                    continue;
+                } else if zero_columns.contains(col_index) {
+                    // assuming it's cleaned up
+                    zero_columns.remove(col_index);
+                    other_columns.insert(*col_index);
+                } else if is_zero {
+                    zero_columns.insert(*col_index);
+                } else {
+                    other_columns.insert(*col_index);
+                }
+            }
+        }
+
+        (zero_columns, other_columns)
     }
 }
 
@@ -739,7 +803,7 @@ pub fn addi_vec(a: &mut BTreeMap<isize, w8>, b: &BTreeMap<isize, w8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{distr::{StandardUniform, Uniform}, prelude::*};
+    use rand::{distr::StandardUniform, prelude::*};
 
     #[test]
     fn test_mat_opcode(){
@@ -755,8 +819,8 @@ mod tests {
             let mat = gen_random_matrix(width as usize, height as usize, &mut rng);
 
             let (p, mut l, mut u) = mat.clone().plu();
-            l.optimize_all();
-            u.optimize_all();
+            l.cleanup_all();
+            u.cleanup_all();
 
             let l_op = l.l_op();
             let u_op = u.u_op();
@@ -814,7 +878,7 @@ mod tests {
     fn gen_random_matrix<T: RngCore>(width: usize, height: usize, rng: &mut T) -> Matrix {
         let range = StandardUniform;
         let mut mat = Vec::new();
-        for i in 0..height {
+        for _ in 0..height {
             let row: Vec<u8> = rng.sample_iter(&range).take(width).collect();
             mat.push(row);
         }
@@ -843,8 +907,8 @@ mod tests {
             times.push(elapsed);
             println!("Double transposed: {i}");
 
-            dtransposed.optimize_all();
-            mat.optimize_all();
+            dtransposed.cleanup_all();
+            mat.cleanup_all();
             assert_eq!(dtransposed, mat);
         }
         let total: u128 = times.iter().map(|x| x.as_micros()).sum();
@@ -900,11 +964,11 @@ mod tests {
             times.push(elapsed);
             // p.apply_matrix(&mut l); // associativity ftw
 
-            u.optimize_all();
+            u.cleanup_all();
             let mut lu = l.matmul(&u);
             p.apply_matrix(&mut lu);
-            lu.optimize_all();
-            mat.optimize_all();
+            lu.cleanup_all();
+            mat.cleanup_all();
             // p.reverse().apply_matrix(&mut mat);
             assert_eq!(lu, mat);
         }
@@ -922,7 +986,7 @@ mod tests {
             vec![2, 4, 6, 9], // partially a multiple of the first row -> 2
             vec![0, 4, 6, 9], // starts with 0 -> 0
         ]);
-        m1.optimize_all();
+        m1.cleanup_all();
         assert_eq!(m1.num_lin(0, 1), (3, w8::ONE));
         assert_eq!(m1.num_lin(0, 2), (3, Wrapping(2)));
         assert_eq!(m1.num_lin(0, 3), (2, Wrapping(2)));
@@ -934,9 +998,9 @@ mod tests {
             vec![0, 0, 2], // partially a multiple of the first row -> 2
             vec![0, 4, 6, 9], // starts with 0 -> 0
         ]);
-        m2.optimize_row(3);
+        m2.cleanup_row(3);
         assert_eq!(m2.num_lin(2, 3), (0, Wrapping(2)));
-        m2.optimize_all();
+        m2.cleanup_all();
         assert_eq!(m2.num_lin(2, 3), (0, Wrapping(0)));
     }
 }

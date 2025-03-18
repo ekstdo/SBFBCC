@@ -10,7 +10,7 @@
 #define HEADER 0x627261696e66636b
 #define INITIAL_BUFFER_SIZE 20
 
-#define PROFILE_ALL
+/* #define PROFILE_ALL */
 /* #define ENABLE_DEBUGGER */
 
 
@@ -26,22 +26,26 @@ typedef enum {
 	LOAD = 7,
 	LOAD_SWAP = 8,
 	SWAP = 9,
-	SHIFT = 10,
-	SHIFT_BIG = 11,
-	READ = 12,
-	WRITE = 13,
-	J = 14,
-	JEZ = 15,
-	JNEZ = 16,
-	JNEZ_SHIFT = 17,
-	SKIP_LOOP = 18,
-	LABEL = 19,
-	DEBUG_BREAK = 20,
-	DEBUG_DATA = 21,
-	MARK_EOF = 22
+	LOAD_MUL = 10,
+	ADD_STORE_MUL = 11,
+	SQADD_REG = 12,
+	SHIFT = 13,
+	SHIFT_BIG = 14,
+	READ = 15,
+	WRITE = 16,
+	J = 17,
+	JEZ = 18,
+	JNEZ = 19,
+	JEZ_SHIFT = 20,
+	JNEZ_SHIFT = 21,
+	SKIP_LOOP = 22,
+	MARK_EOF = 23,
+	DEBUG_BREAK = 24,
+	LABEL = 128,
+	DEBUG_DATA = 129,
 } Op;
 
-char opnames[1+MARK_EOF][14] = {
+char opnames[256][14] = {
 	"ADD_CONST",
 	"SET_CONST",
 	"MUL_CONST",
@@ -52,6 +56,9 @@ char opnames[1+MARK_EOF][14] = {
 	"LOAD",
 	"LOAD_SWAP",
 	"SWAP",
+	"LOAD_MUL",
+	"ADD_STORE_MUL",
+	"SQADD_REG",
 	"SHIFT",
 	"SHIFT_BIG",
 	"READ",
@@ -59,12 +66,14 @@ char opnames[1+MARK_EOF][14] = {
 	"J",
 	"JEZ",
 	"JNEZ",
+	"JEZ_SHIFT",
 	"JNEZ_SHIFT",
-	"LABEL",
-	"DEBUG_BREAK",
-	"DEBUG_DATA",
 	"SKIP_LOOP",
-	"MARK_EOF"
+	"MARK_EOF",
+	"DEBUG_BREAK",
+	"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+	"LABEL",
+	"DEBUG_DATA",
 };
 
 char* rtrim(char* s) {
@@ -150,6 +159,8 @@ int profile_jez_true = 0;
 int profile_jez_false = 0;
 int profile_jnez_true = 0;
 int profile_jnez_false = 0;
+int profile_jezs_true = 0;
+int profile_jezs_false = 0;
 int profile_jnezs_true = 0;
 int profile_jnezs_false = 0;
 /* uint8_t tape[U16MAX]; */
@@ -230,6 +241,9 @@ int run_bytecode(ParseOutput p) {
 		&&CASE_LOAD,
 		&&CASE_LOAD_SWAP,
 		&&CASE_SWAP,
+		&&CASE_LOAD_MUL,
+		&&CASE_ADD_STORE_MUL,
+		&&CASE_SQADD_REG,
 		&&CASE_SHIFT,
 		&&CASE_SHIFT_BIG,
 		&&CASE_READ,
@@ -237,12 +251,11 @@ int run_bytecode(ParseOutput p) {
 		&&CASE_J,
 		&&CASE_JEZ,
 		&&CASE_JNEZ,
+		&&CASE_JEZ_SHIFT,
 		&&CASE_JNEZ_SHIFT,
 		&&CASE_SKIP_LOOP,
-		&&CASE_LABEL,
+		&&CASE_MARK_EOF,
 		&&CASE_DEBUG_BREAK,
-		&&CASE_DEBUG_DATA,
-		&&CASE_MARK_EOF
 	};
 
 
@@ -310,7 +323,18 @@ int run_bytecode(ParseOutput p) {
 	CASE_WRITE:
 		putchar(index[pc->l]);
 		PC(+= 1);
-		DISPATCH;;
+		DISPATCH;
+	CASE_JEZ_SHIFT:
+		index += pc->s;
+		if (!*index) {
+			PC(= opcodes + pc->l);
+			PROFILE_INC(profile_jezs_true);
+			DISPATCH;
+		} else {
+			PC(+= 1);
+			PROFILE_INC(profile_jezs_false);
+			DISPATCH;
+		}
 	CASE_JNEZ_SHIFT:
 		index += pc->s;
 		// 92% success rate for this branch for mandelbrot.lbf
@@ -343,6 +367,7 @@ int run_bytecode(ParseOutput p) {
 	CASE_MARK_EOF:
 		return 0;
 	CASE_JNEZ:
+		// around 66% success rate, so not enough for __builtin_expect
 		if (*index) {
 			PROFILE_INC(profile_jnez_true);
 			CASE_J:
@@ -353,17 +378,31 @@ int run_bytecode(ParseOutput p) {
 			PC(+= 1);
 			DISPATCH;
 		}
-
 	CASE_DEBUG_BREAK:
 #ifdef ENABLE_DEBUGGER
 		goto DEBUG;
 #endif
-	CASE_LABEL:
 	CASE_SHIFT_BIG:
-	CASE_DEBUG_DATA:
 		PC(+= 1);
 		DISPATCH;
 
+	CASE_LOAD_MUL:
+		reg = pc->b * index[pc->l];
+		PC(+= 1);
+		// is always followed by ADD_STORE_MUL
+	CASE_ADD_STORE_MUL:
+		index[pc->l] = reg * pc->b;
+		PC(+= 1);
+		DISPATCH;
+	CASE_SQADD_REG:
+		reg += 1;
+		tmp = index[pc->l];
+		reg = tmp & 1 ? (reg >> 1) * tmp : (tmp >> 1) * reg;
+		PC(+= 1);
+		// is always followed by ADD_STORE_MUL
+		index[pc->l] = reg * pc->b;
+		PC(+= 1);
+		DISPATCH;
 #ifdef ENABLE_DEBUGGER
 	DEBUG:
 		printf("\x1b[32m[ENTERED DEBUG MODE]\n");
@@ -569,6 +608,7 @@ ParseOutput read_opcodes(FILE* fd) {
 
 
 	if (num_translated != num_opcodes) {
+		printf("Num translated: %ld, num_opcodes: %ld\n", num_translated, num_opcodes);
 		perror("Missing debug data!");
 		exit(1);
 	}
@@ -631,6 +671,9 @@ char* print_instruction(ParsedOpcode* op) {
 			break;
 		case JNEZ:
 			sprintf(buffer, "JNEZ            /     jnez %d;", op->l);
+			break;
+		case JEZ_SHIFT:
+			sprintf(buffer, "JEZ_SHIFT      /     t += %d; jnez %d;", op->s, op->l);
 			break;
 		case JNEZ_SHIFT:
 			sprintf(buffer, "JNEZ_SHIFT      /     t += %d; jnez %d;", op->s, op->l);
@@ -703,8 +746,8 @@ int main(int argc, char** argv) {
 	free(parsed.line_lengths);
 	
 #ifdef PROFILE_ALL
-	for (int i = 0; i < num_opcodes; i++) {
-		char* inst = print_instruction(&opcodes[i]);
+	for (int i = 0; i < parsed.num_opcodes; i++) {
+		char* inst = print_instruction(&parsed.opcodes[i]);
 		char* col = get_grad(profile_inst[i] >> 2);
 		printf("%5d: %-64s  -> #%s%d\x1b[0m\n", i, inst, col, profile_inst[i]);
 		free(inst);
@@ -744,16 +787,22 @@ int main(int argc, char** argv) {
 			printf("\tJEZ Success: %d\n\tJEZ Fail: %d\n", profile_jez_true, profile_jez_false);
 		} else if (i == JNEZ_SHIFT) {
 			printf("\tJNEZ SHIFT Success: %d\n\tJNEZ SHIFT Fail: %d\n", profile_jnezs_true, profile_jnezs_false);
+		} else if (i == JEZ_SHIFT) {
+			printf("\tJNEZ SHIFT Success: %d\n\tJNEZ SHIFT Fail: %d\n", profile_jezs_true, profile_jezs_false);
 		}
 	}
 
 	printf("from / to   ");
-	for (int i = 0; i < SKIP_LOOP; i++)
+	for (int i = 0; i <= SKIP_LOOP; i++) {
+		if (profile_inst_type[i] == 0) continue;
 		printf("%10s", opnames[i]);
+	}
 	printf("\n");
-	for (int i = 0; i < SKIP_LOOP; i++) {
+	for (int i = 0; i <= SKIP_LOOP; i++) {
+		if (profile_inst_type[i] == 0) continue;
 		printf("%-8s:", opnames[i]);
-		for (int j = 0; j < SKIP_LOOP; j++) {
+		for (int j = 0; j <= SKIP_LOOP; j++) {
+			if (profile_inst_type[j] == 0) continue;
 			int val = profile_from_to[i][j];
 			char* col = get_grad_factor(val>>10, 1.1);
 			printf("%s%10d\x1b[0m", col, val);

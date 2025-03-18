@@ -101,7 +101,7 @@ If a branch `Branch(inner, preshift, postshift)` is followed by
 
 it can be discarded, as the current value always 0.
 
-### Affine only lines (TODO)
+### Affine only lines
 
 If a `OffsetMap o` contains a zero row in the linear part (so only affine, i.e. `t[i] = x`) and gets repeated,
 it doesn't make sense to repeatedly set the same value again:
@@ -241,7 +241,8 @@ $= a k (s k + 1) / 2 + c s k$
 (k is even -> $k (s k + 1)$ is even -> divisible by 2)
 (k is odd -> $s k$ is odd -> $s k + 1$ is even -> $k (s k + 1)$ is even -> divisible by 2)
 
-How do we compute it? (as much in compile time as possible!)
+How do we compute it? (as much in compile time as we want, but as little runtime as possible!)
+
 
 ```
 if a is even: b = a/2 is computed at compiletime:
@@ -273,6 +274,8 @@ if a is even: b = a/2 is computed at compiletime:
 if a is odd, we can't incorporate /2 into a, but have to watch it at runtime:
     if k % 2 == 0 { (k/2) * ... } else {(s k + 1)/2 * ...}
 
+$= a k (s k + 1) / 2 + c s k$
+
     s = -1/r
 
     runtime:
@@ -280,11 +283,9 @@ if a is odd, we can't incorporate /2 into a, but have to watch it at runtime:
     result += c * l
     l += 1
     if (k % 2 == 0) { // jump if even
-        l *= k;
-        l >>= 1;
+        l = l * (k / 2);
     } else {          // jump
-        l >>= 1;
-        l *= k;
+        l = (l / 2) * k;
     }
     result += a * l; // 6 lin comb inst, 2 jump inst
 ```
