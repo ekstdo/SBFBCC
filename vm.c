@@ -13,8 +13,6 @@
 /* #define PROFILE_ALL */
 /* #define ENABLE_DEBUGGER */
 
-
-
 typedef enum {
 	ADD_CONST = 0,
 	SET_CONST = 1,
@@ -22,25 +20,26 @@ typedef enum {
 	ADD_MUL = 3,
 	ADD_CELL = 4,
 	ADDN_SET0 = 5,
-	SUB_CELL = 6,
-	LOAD = 7,
-	LOAD_SWAP = 8,
-	SWAP = 9,
-	LOAD_MUL = 10,
-	ADD_STORE_MUL = 11,
-	SQADD_REG = 12,
-	SHIFT = 13,
-	SHIFT_BIG = 14,
-	READ = 15,
-	WRITE = 16,
-	J = 17,
-	JEZ = 18,
-	JNEZ = 19,
-	JEZ_SHIFT = 20,
-	JNEZ_SHIFT = 21,
-	SKIP_LOOP = 22,
-	MARK_EOF = 23,
-	DEBUG_BREAK = 24,
+	SUBN_SET0 = 6,
+	SUB_CELL = 7,
+	LOAD = 8,
+	LOAD_SWAP = 9,
+	SWAP = 10,
+	LOAD_MUL = 11,
+	ADD_STORE_MUL = 12,
+	SQADD_REG = 13,
+	SHIFT = 14,
+	SHIFT_BIG = 15,
+	READ = 16,
+	WRITE = 17,
+	J = 18,
+	JEZ = 19,
+	JNEZ = 20,
+	JEZ_SHIFT = 21,
+	JNEZ_SHIFT = 22,
+	SKIP_LOOP = 23,
+	MARK_EOF = 24,
+	DEBUG_BREAK = 25,
 	LABEL = 128,
 	DEBUG_DATA = 129,
 } Op;
@@ -52,6 +51,7 @@ char opnames[256][14] = {
 	"ADD_MUL",
 	"ADD_CELL",
 	"ADDN_SET0",
+	"SUBN_SET0",
 	"SUB_CELL",
 	"LOAD",
 	"LOAD_SWAP",
@@ -71,7 +71,7 @@ char opnames[256][14] = {
 	"SKIP_LOOP",
 	"MARK_EOF",
 	"DEBUG_BREAK",
-	"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+	"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
 	"LABEL",
 	"DEBUG_DATA",
 };
@@ -103,6 +103,14 @@ typedef struct {
 	uint8_t b;
 	uint8_t op;
 } ParsedOpcode;
+
+
+typedef struct _ResultingOpcode {
+	void (*handler)(struct _ResultingOpcode* restrict instructions, uint8_t* restrict index, uint8_t reg, uint8_t tmp);
+	int32_t l;
+	int32_t s;
+	uint8_t b;
+} ResultingOpcode;
 
 
 char* print_instruction(ParsedOpcode* op);
@@ -186,6 +194,7 @@ typedef struct {
 
 typedef struct {
 	ParsedOpcode* opcodes;
+	ResultingOpcode* ropcodes;
 	int num_opcodes;
 	ParseDebugPos* debug_pos; // list of Debug pos
 	int num_debug_pos;
@@ -195,6 +204,14 @@ typedef struct {
 	size_t* line_lengths;
 	int num_lines;
 } ParseOutput;
+
+
+
+
+
+
+
+#define DISPATCHER 0 // can be: 0 = SWITCH, 1 = DIRECT, 2 = TAILCALL
 
 
 
@@ -229,7 +246,14 @@ int run_bytecode(ParseOutput p) {
 #define PROFILE_INC(x) 
 #endif
 
-
+#if DISPATCHER == 0
+	while (1) {
+		switch (pc->op) {
+#define CASE(x) case x:
+#define DISPATCH PROFILE_INST break;
+#define DISPATCH2
+#define PC_TYPE_IS(x) pc->op == x
+#elif DISPATCHER == 1
 	static const void* table[] = {
 		&&CASE_ADD_CONST,
 		&&CASE_SET_CONST,
@@ -237,6 +261,7 @@ int run_bytecode(ParseOutput p) {
 		&&CASE_ADD_MUL,
 		&&CASE_ADD_CELL,
 		&&CASE_ADDN_SET0,
+		&&CASE_SUBN_SET0,
 		&&CASE_SUB_CELL,
 		&&CASE_LOAD,
 		&&CASE_LOAD_SWAP,
@@ -257,144 +282,158 @@ int run_bytecode(ParseOutput p) {
 		&&CASE_MARK_EOF,
 		&&CASE_DEBUG_BREAK,
 	};
-
-
 #define DISPATCH do { \
 	PROFILE_INST \
 	goto *table[pc->op]; \
 } while (0)
-
 	DISPATCH;
+#define CASE(x) CASE_ ## x:
+#define PC_TYPE_IS(x) pc->op == x
+#define DISPATCH2
+#elif DISPATCHER == 2
+	return 0;
+}
+#define CASE(x) void fn_ ## x(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) {
 
-	CASE_ADD_CONST: PROFILE_INC(profile_add_const[pc->b]);
+#if defined(__clang__)
+#define NEXT_INSTRUCTION do {__attribute__((musttail)) return pc->handler(pc, index, reg, tmp); } while (0)
+#elif defined(__GNUC__)
+#define NEXT_INSTRUCTION do {  return pc->handler(pc, index, reg, tmp); } while (0)
+#else
+#error "Unsupported compiler"
+#endif
+
+#define DISPATCH NEXT_INSTRUCTION; }
+#define DISPATCH2 NEXT_INSTRUCTION; }
+#define PC_TYPE_IS(x) pc->handler == fn_ ## x
+#endif
+
+
+	CASE(ADD_CONST) PROFILE_INC(profile_add_const[pc->b]);
 		index[pc->l] += pc->b;
 		PC(+= 1);
 		DISPATCH;
-	CASE_SET_CONST: PROFILE_INC(profile_set_const[pc->b]);
-		index[pc->l] = pc->b;
-		PC(+= 1);
-		DISPATCH;
-	CASE_MUL_CONST:
-		index[pc->l] *= pc->b;
-		PC(+= 1);
-		DISPATCH;
-	CASE_ADD_MUL: PROFILE_INC(profile_add_mul[pc->b]);
-		index[pc->l] += pc->b * index[pc-> l + pc->s];
-		PC(+= 1);
-		DISPATCH;
-	CASE_ADD_CELL:
-		index[pc->l] += index[pc->l + pc->s];
-		PC(+= 1);
-		DISPATCH;
-	CASE_ADDN_SET0:
+
+	CASE(ADDN_SET0)
 		index[pc->l] += index[pc->l + pc->s];
 		index[pc->l + pc->s] = 0;
 		PC(+= 1);
 		DISPATCH;
-	CASE_SUB_CELL:
+	CASE(SET_CONST) PROFILE_INC(profile_set_const[pc->b]);
+		index[pc->l] = pc->b;
+		PC(+= 1);
+		DISPATCH;
+	CASE(MUL_CONST)
+		index[pc->l] *= pc->b;
+		PC(+= 1);
+		DISPATCH;
+	CASE(ADD_MUL) PROFILE_INC(profile_add_mul[pc->b]);
+		index[pc->l] += pc->b * index[pc-> l + pc->s];
+		PC(+= 1);
+		DISPATCH;
+	CASE(ADD_CELL)
+		index[pc->l] += index[pc->l + pc->s];
+		PC(+= 1);
+		DISPATCH;
+	CASE(SUBN_SET0)
+		index[pc->l] -= index[pc->l + pc->s];
+		index[pc->l + pc->s] = 0;
+		PC(+= 1);
+		DISPATCH;
+	CASE(SUB_CELL)
 		index[pc->l] -= index[pc->l + pc->s];
 		PC(+= 1);
 		DISPATCH;
-	CASE_LOAD:
+	CASE(LOAD)
 		reg = index[pc->l];
 		PC(+= 1);
-	CASE_LOAD_SWAP:
+		DISPATCH2
+	CASE(LOAD_SWAP)
 		do {
 			tmp = index[pc->l];
 			index[pc->l] = reg;
 			reg = tmp;
 			PC(+= 1);
-		} while (pc->op == LOAD_SWAP);
+		} while (PC_TYPE_IS(LOAD_SWAP));
 		DISPATCH;
-	CASE_SWAP:
+	CASE(SWAP)
 		tmp = index[pc->l + pc->s];
 		index[pc->l + pc->s] = index[pc->l];
 		index[pc->l] = tmp;
 		PC(+= 1);
 		DISPATCH;
-	CASE_SHIFT:
+	CASE(SHIFT)
 		index += (signed int) pc->l;
 		PC(+= 1);
 		DISPATCH;
-	CASE_READ:
+	CASE(READ)
 		index[pc->l] = getchar();
 		PC(+= 1);
 		DISPATCH;
-	CASE_WRITE:
+	CASE(WRITE)
 		putchar(index[pc->l]);
 		PC(+= 1);
 		DISPATCH;
-	CASE_JEZ_SHIFT:
+	CASE(JEZ_SHIFT)
 		index += pc->s;
 		if (!*index) {
 			PC(= opcodes + pc->l);
 			PROFILE_INC(profile_jezs_true);
-			DISPATCH;
 		} else {
 			PC(+= 1);
 			PROFILE_INC(profile_jezs_false);
-			DISPATCH;
 		}
-	CASE_JNEZ_SHIFT:
+		DISPATCH;
+	CASE(JNEZ_SHIFT)
 		index += pc->s;
 		// 92% success rate for this branch for mandelbrot.lbf
 		if (__builtin_expect(!!*index, 1)) {
 			PC(= opcodes + pc->l);
 			PROFILE_INC(profile_jnezs_true);
-			DISPATCH;
 		} else {
 			PC(+= 1);
 			PROFILE_INC(profile_jnezs_false);
-			DISPATCH;
 		}
-	CASE_JEZ:
+		DISPATCH;
+	CASE(JEZ)
 		if (!*index) {
 			PC(= opcodes + pc->l);
 			PROFILE_INC(profile_jez_true);
-			DISPATCH;
 		} else {
-			PC(+= 1);
 			PROFILE_INC(profile_jez_false);
-			DISPATCH;
+			PC(+= 1);
 		}
-
-	CASE_SKIP_LOOP:
+		DISPATCH;
+	CASE(SKIP_LOOP)
 		while (*index) {
 			index += pc->l;
 		}
 		PC(+= 1);
 		DISPATCH;
-	CASE_MARK_EOF:
-		return 0;
-	CASE_JNEZ:
+
+	CASE(JNEZ)
 		// around 66% success rate, so not enough for __builtin_expect
 		if (*index) {
 			PROFILE_INC(profile_jnez_true);
 			CASE_J:
 			PC(= opcodes + pc->l);
-			DISPATCH;
 		} else {
 			PROFILE_INC(profile_jnez_false);
 			PC(+= 1);
-			DISPATCH;
 		}
-	CASE_DEBUG_BREAK:
-#ifdef ENABLE_DEBUGGER
-		goto DEBUG;
-#endif
-	CASE_SHIFT_BIG:
-		PC(+= 1);
 		DISPATCH;
-
-	CASE_LOAD_MUL:
+	CASE(LOAD_MUL)
 		reg = pc->b * index[pc->l];
 		PC(+= 1);
 		// is always followed by ADD_STORE_MUL
-	CASE_ADD_STORE_MUL:
+		DISPATCH2
+	CASE(ADD_STORE_MUL)
 		index[pc->l] = reg * pc->b;
+		DISPATCH2
+	CASE(SHIFT_BIG) // TODO
 		PC(+= 1);
 		DISPATCH;
-	CASE_SQADD_REG:
+	CASE(SQADD_REG)
 		reg += 1;
 		tmp = index[pc->l];
 		reg = tmp & 1 ? (reg >> 1) * tmp : (tmp >> 1) * reg;
@@ -402,6 +441,19 @@ int run_bytecode(ParseOutput p) {
 		// is always followed by ADD_STORE_MUL
 		index[pc->l] = reg * pc->b;
 		PC(+= 1);
+		DISPATCH;
+
+	CASE(MARK_EOF)
+#if DISPATCHER == 2 
+	}
+#else
+		return 0;
+#endif
+
+	CASE(DEBUG_BREAK)
+#ifdef ENABLE_DEBUGGER
+		goto DEBUG;
+#endif
 		DISPATCH;
 #ifdef ENABLE_DEBUGGER
 	DEBUG:
@@ -531,11 +583,159 @@ int run_bytecode(ParseOutput p) {
 			}
 		} while (1);
 	QUIT_DEBUG:
-		if (pc->op == DEBUG_BREAK)
+		if (PC_TYPE_IS(DEBUG_BREAK))
 			pc += 1;
 		DISPATCH;
 #endif /* ifdef ENABLE_DEBUGGER */
+#if DISPATCHER == 0
+		}
+	}
+#endif
+#if DISPATCHER < 2 
 }
+#endif
+
+
+
+
+
+/* void add_const(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	index[pc->l] += pc->b; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void set_const(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	index[pc->l] = pc->b; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void mul_const(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	index[pc->l] *= pc->b; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void add_mul(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	index[pc->l] += pc->b * index[pc-> l + pc->s]; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void add_cell(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	index[pc->l] += index[pc->l + pc->s]; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void addn_set0(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	index[pc->l] += index[pc->l + pc->s]; */
+/* 	index[pc->l + pc->s] = 0; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void subn_set0(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	index[pc->l] -= index[pc->l + pc->s]; */
+/* 	index[pc->l + pc->s] = 0; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void sub_cell(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	index[pc->l] -= index[pc->l + pc->s]; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void load_swap(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	do { */
+/* 		tmp = index[pc->l]; */
+/* 		index[pc->l] = reg; */
+/* 		reg = tmp; */
+/* 		pc++; */
+/* 	} while (pc->handler == load_swap); */
+/* 	NEXT_INSTRUCTION; } */
+/* void load(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	reg = index[pc->l]; */
+/* 	pc++; */ 
+/* 	do { */
+/* 		tmp = index[pc->l]; */
+/* 		index[pc->l] = reg; */
+/* 		reg = tmp; */
+/* 		pc++; */
+/* 	} while (pc->handler == load_swap); */
+/* 	NEXT_INSTRUCTION; } */
+/* void swap(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	tmp = index[pc->l + pc->s]; */
+/* 	index[pc->l + pc->s] = index[pc->l]; */
+/* 	index[pc->l] = tmp; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void load_mul(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	reg = pc->b * index[pc->l]; */
+/* 	pc++; */
+/* 	reg = pc->b * index[pc->l]; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void add_store_mul(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	reg = pc->b * index[pc->l]; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void sqadd_reg(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	reg += 1; */
+/* 	tmp = index[pc->l]; */
+/* 	reg = tmp & 1 ? (reg >> 1) * tmp : (tmp >> 1) * reg; */
+/* 	pc += 1; */
+/* 	// is always followed by ADD_STORE_MUL */
+/* 	index[pc->l] = reg * pc->b; */
+/* 	pc += 1; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void shift(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	index += pc->l; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void shift_big(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	index += pc->l * U16MAX; */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void read(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	index[pc->l] = getchar(); */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void write(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	putchar(index[pc->l]); */
+/* 	pc++; NEXT_INSTRUCTION; } */
+/* void j(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	pc += pc->l; NEXT_INSTRUCTION; } */
+/* void jnez(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
+/* 	pc += pc->l; NEXT_INSTRUCTION; } */
+
+
+/* void (*converter[MARK_EOF])(struct _ResultingOpcode* restrict instructions, uint8_t* restrict index, uint8_t reg, uint8_t tmp) = { */
+/* 	add_const, */
+/* 	set_const, */
+/* 	mul_const, */
+/* 	add_mul, */
+/* 	add_cell, */
+/* 	addn_set0, */
+/* 	subn_set0, */
+/* 	sub_cell, */
+/* 	load, */
+/* 	load_swap, */
+/* 	swap, */
+/* 	load_mul, */
+/* 	add_store_mul, */
+/* 	sqadd_reg, */
+/* 	shift, */
+/* 	shift_big, */
+/* 	read, */
+/* 	write, */
+/* 	j, */
+/* 	/1* jez, *1/ */
+/* 	/1* jnez, *1/ */
+/* 	/1* jez_shift, *1/ */
+/* 	/1* jnez_shift, *1/ */
+/* 	/1* skip_loop, *1/ */
+/* 	/1* mark_eof, *1/ */
+/* 	/1* debug_break, *1/ */
+/* }; */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 void magic_number_check(FILE* fd) {
 	uint64_t buffer;
@@ -699,11 +899,23 @@ char* print_instruction(ParsedOpcode* op) {
 		case SWAP:
 			sprintf(buffer, "SWAP            /     t[%d], t[%d] = t[%d], t[%d];", op->l, op->l + op->s, op->l + op->s, op->l);
 			break;
+		case LOAD_MUL:
+			sprintf(buffer, "LOAD_MUL        /     r = %d * t[%d];", op->b, op->l);
+			break;
+		case ADD_STORE_MUL:
+			sprintf(buffer, "ADD_STORE_MUL   /     t[%d] = %d * r;", op->l, op->b);
+			break;
+		case SQADD_REG:
+			sprintf(buffer, "SQADD_REG       /     r += 1; r = t[%d] %% 2 == 0 ? r * (t[%d] >> 1) : (r >> 1) * t[%d];", op->l, op->l, op->l);
+			break;
 		case ADD_CELL:
 			sprintf(buffer, "ADD_CELL        /     t[%d] += t[%d];", op->l, op->l + op->s);
 			break;
 		case ADDN_SET0:
 			sprintf(buffer, "ADDN_SET0       /     t[%d] += t[%d]; t[%d] = 0;", op->l, op->l + op->s, op->l + op->s);
+			break;
+		case SUBN_SET0:
+			sprintf(buffer, "SUBN_SET0       /     t[%d] += t[%d]; t[%d] = 0;", op->l, op->l + op->s, op->l + op->s);
 			break;
 		case SUB_CELL:
 			sprintf(buffer, "SUB_CELL        /     t[%d] -= t[%d];", op->l, op->l + op->s);
