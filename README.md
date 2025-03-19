@@ -14,14 +14,18 @@ affine linear Matrices with some optimizations (see [below](#Optimizations)).
 
 ```
 cargo +nightly build --release
-gcc vm.c -O3 -o vm
+# with gcc
+gcc vm.c -Wall -Wextra -O3 -ffast-math -fwhole-program -march=native -std=gnu23 -o vm_gcc
+# with clang:
+clang vm.c -O3 -ffast-math -march=native -flto -o vm_clang
 ```
 
 ## Running
 
 ```
 ./target/release/SBFBCC ./<brainfuck file>.bf
-./vm ./<brainfuck file>.lbf
+time ./vm_gcc ./<brainfuck file>.lbf
+# or ./vm_clang
 ```
 # Optimizations
 
