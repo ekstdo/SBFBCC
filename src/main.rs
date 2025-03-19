@@ -399,6 +399,8 @@ impl BFAffineT<isize> for BFAddMap {
                     let mut o = *o;
                     let mut back_index = index as isize - 1;
                     while back_index >= 0 {
+                        println!("{:?}", out_opcode);
+                        let Some(Opcode::SetConst(_, _)) = out_opcode.get(index) else {panic!("Wrong check! {index} {back_index}")};
                         match &out_opcode[back_index as usize] {
                             Opcode::AddCell(offset, to) => {
                                 let from = *offset as i32 + *to;
@@ -413,9 +415,26 @@ impl BFAffineT<isize> for BFAddMap {
                                     index -= 1;
                                     let mut new_opcode = Opcode::AddnSet0(offset, to);
                                     std::mem::swap(&mut out_opcode[back_index as usize], &mut new_opcode);
+                                    break;
                                 }
                             }
-                            Opcode::AddMul(_, offset, to) | Opcode::SubCell(offset, to) => {
+                            Opcode::SubCell(offset, to) => {
+                                let from = *offset as i32 + *to;
+                                // it's being overwritten anyway
+                                if o == *to {
+                                    out_opcode.remove(back_index as usize);
+                                    index -= 1;
+                                } else if o == from {
+                                    let offset = *offset;
+                                    let to = *to;
+                                    let Opcode::SetConst(_, _) = out_opcode.remove(index) else {panic!("Wrong check!")};
+                                    index -= 1;
+                                    let mut new_opcode = Opcode::SubnSet0(offset, to);
+                                    std::mem::swap(&mut out_opcode[back_index as usize], &mut new_opcode);
+                                    break;
+                                }
+                            }
+                            Opcode::AddMul(_, offset, to) => {
                                 let from = *offset as i32 + *to;
                                 // it's being overwritten anyway
                                 if o == *to {
@@ -425,12 +444,14 @@ impl BFAffineT<isize> for BFAddMap {
                                     break;
                                 }
                             },
-                            Opcode::AddnSet0(offset, add_to) => {
+                            Opcode::AddnSet0(offset, add_to) | Opcode::SubnSet0(offset, add_to) => {
                                 let zero_to = *add_to + *offset as i32;
                                 if o == zero_to {
                                     // this means the SetConst(w8::ZERO) is useless
                                     out_opcode.remove(index);
                                     index -= 1;
+                                    break;
+                                } else if o == *add_to {
                                     break;
                                 }
                             },
@@ -465,13 +486,18 @@ impl BFAffineT<isize> for BFAddMap {
                             let add_a = *a as i32 + *b;
                             let add_b = *b;
                             (a_swap == add_a && b_swap == add_b) || (a_swap == add_b && b_swap == add_a)
-                        }
+                        }, 
+                        Opcode::SubnSet0(a, b) => {
+                            let add_a = *a as i32 + *b;
+                            let add_b = *b;
+                            (a_swap == add_a && b_swap == add_b) || (a_swap == add_b && b_swap == add_a)
+                        }, 
                         _ => false
                     }) else { index += 1; continue; };
                     let mut back_index = index - 1;
                     while back_index > pos {
                         match &mut out_opcode[back_index] {
-                            Opcode::AddCell(offset, to) | Opcode::AddMul(_, offset, to) | Opcode::SubCell(offset, to) | Opcode::AddnSet0(offset, to) => {
+                            Opcode::AddCell(offset, to) | Opcode::AddMul(_, offset, to) | Opcode::SubCell(offset, to) | Opcode::AddnSet0(offset, to) | Opcode::SubnSet0(offset, to) => {
                                 let from_cell = *offset as i32 + *to;
                                 let to_cell = *to;
                                 if to_cell == a_swap {
@@ -501,12 +527,17 @@ impl BFAffineT<isize> for BFAddMap {
                         }
                         back_index -= 1;
                     }
-                    let Some(Opcode::AddnSet0(a, b)) = out_opcode.get_mut(pos) else {panic!("Wrong check")};
-                    let from = *b + *a as i32;
-                    *b = from;
-                    *a = -*a;
-                    out_opcode.remove(index);
-                    index -= 1;
+                    match out_opcode.get_mut(pos) {
+                        Some(Opcode::AddnSet0(a, b)) | Some(Opcode::SubnSet0(a, b)) => {
+                            let from = *b + *a as i32;
+                            *b = from;
+                            *a = -*a;
+                            out_opcode.remove(index);
+                            index -= 1;
+                        }
+                        _ => {panic!("Wrong check")}
+                    }
+
                 },
                 _ => {}
             }
@@ -746,6 +777,7 @@ impl<T: BFAffineT<isize> + std::fmt::Debug + Clone> Optree<T> {
                     result.push_str(&match op {
                         Opcode::AddCell(offset, to) => format!("{}t[{}] += t[{}];\n", indentation, to, to + offset as i32),
                         Opcode::AddnSet0(offset, to) => format!("{}t[{}] += t[{}]; t[{}] = 0;\n", indentation, to, to + offset as i32, to + offset as i32),
+                        Opcode::SubnSet0(offset, to) => format!("{}t[{}] -= t[{}]; t[{}] = 0;\n", indentation, to, to + offset as i32, to + offset as i32),
                         Opcode::SubCell(offset, to) => format!("{}t[{}] -= t[{}];\n", indentation, to, to + offset as i32),
                         Opcode::AddMul(val, offset, to) => format!("{}t[{}] += {} * t[{}];\n", indentation, to, val, to + offset as i32),
                         Opcode::SetConst(val, to) => format!("{}t[{}] = {};\n", indentation, to, val),
@@ -1454,6 +1486,7 @@ pub enum Opcode {
     AddCell(i16, i32),    // t[c] += t[c + b]
     SubCell(i16, i32),    // t[c] += t[c + b]
     AddnSet0(i16, i32),   // t[b] += t[a + b]; t[a + b] = 0;
+    SubnSet0(i16, i32),   // t[b] -= t[a + b]; t[a + b] = 0;
     Load(i32),            // r = t[a]
     LoadSwap(i32),        // r, t[a] = t[a], r
     // Store(i32),        // t[a] = r; // not very useful, as: 1. bytecode vm is faster avoiding
@@ -1500,24 +1533,25 @@ impl From<&Opcode> for u64 {
             Opcode::AddMul(v, o, c) =>  (3 << 56) | ((v.0 as u64) << 48) | (((*o as u16) as u64) << 32) | ((*c as u32) as u64) ,
             Opcode::AddCell(o, c) =>  (4 << 56) | (((*o as u16) as u64) << 32) | ((*c as u32) as u64) ,
             Opcode::AddnSet0(o, c) =>  (5 << 56) | (((*o as u16) as u64) << 32) | ((*c as u32) as u64) ,
-            Opcode::SubCell(o, c) =>  (6 << 56) | (((*o as u16) as u64) << 32) | ((*c as u32) as u64) ,
-            Opcode::Load(c) =>  (7 << 56) | ((*c as u32) as u64) ,
-            Opcode::LoadSwap(c) =>  (8 << 56) | ((*c as u32) as u64) ,
-            Opcode::Swap(o, c) =>  (9 << 56) | (((*o as u16) as u64) << 32) | ((*c as u32) as u64) ,
-            Opcode::LoadMul(v, c) => (10 << 56) | ((v.0 as u64) << 48) | ((*c as u32) as u64) ,
-            Opcode::AddStoreMul(v, c) => (11 << 56) | ((v.0 as u64) << 48) | ((*c as u32) as u64) ,
-            Opcode::SquareAddReg(c) => (12 << 56)  | ((*c as u32) as u64) ,
-            Opcode::Shift(c) =>  (13 << 56) | ((*c as u32) as u64) ,
-            Opcode::ShiftBig(c) =>  (14 << 56) | ((*c as u32) as u64) ,
-            Opcode::Read(c) =>  (15 << 56) | ((*c as u32) as u64) ,
-            Opcode::Write(c) =>  (16 << 56) | ((*c as u32) as u64) ,
-            Opcode::J(c) =>  (17 << 56) | (*c as u64) ,
-            Opcode::Jez(c) =>  (18 << 56) | (*c as u64) ,
-            Opcode::Jnez(c) =>  (19 << 56) | (*c as u64) ,
-            Opcode::JezShift(o, c) =>  (20 << 56) | (((*o as u16) as u64) << 32) | (*c as u64) ,
-            Opcode::JnezShift(o, c) =>  (21 << 56) | (((*o as u16) as u64) << 32) | (*c as u64) ,
-            Opcode::SkipLoop(c) => (22 << 56) | ((*c as u32) as u64),
-            Opcode::DebugBreakpoint => 24 << 56,
+            Opcode::SubnSet0(o, c) =>  (6 << 56) | (((*o as u16) as u64) << 32) | ((*c as u32) as u64) ,
+            Opcode::SubCell(o, c) =>  (7 << 56) | (((*o as u16) as u64) << 32) | ((*c as u32) as u64) ,
+            Opcode::Load(c) =>  (8 << 56) | ((*c as u32) as u64) ,
+            Opcode::LoadSwap(c) =>  (9 << 56) | ((*c as u32) as u64) ,
+            Opcode::Swap(o, c) =>  (10 << 56) | (((*o as u16) as u64) << 32) | ((*c as u32) as u64) ,
+            Opcode::LoadMul(v, c) => (11 << 56) | ((v.0 as u64) << 48) | ((*c as u32) as u64) ,
+            Opcode::AddStoreMul(v, c) => (12 << 56) | ((v.0 as u64) << 48) | ((*c as u32) as u64) ,
+            Opcode::SquareAddReg(c) => (13 << 56)  | ((*c as u32) as u64) ,
+            Opcode::Shift(c) =>  (14 << 56) | ((*c as u32) as u64) ,
+            Opcode::ShiftBig(c) =>  (15 << 56) | ((*c as u32) as u64) ,
+            Opcode::Read(c) =>  (16 << 56) | ((*c as u32) as u64) ,
+            Opcode::Write(c) =>  (17 << 56) | ((*c as u32) as u64) ,
+            Opcode::J(c) =>  (18 << 56) | (*c as u64) ,
+            Opcode::Jez(c) =>  (19 << 56) | (*c as u64) ,
+            Opcode::Jnez(c) =>  (20 << 56) | (*c as u64) ,
+            Opcode::JezShift(o, c) =>  (21 << 56) | (((*o as u16) as u64) << 32) | (*c as u64) ,
+            Opcode::JnezShift(o, c) =>  (22 << 56) | (((*o as u16) as u64) << 32) | (*c as u64) ,
+            Opcode::SkipLoop(c) => (23 << 56) | ((*c as u32) as u64),
+            Opcode::DebugBreakpoint => 25 << 56,
             Opcode::Label(c) =>  (128 << 56) | (*c as u64) ,
             Opcode::DebugData(num_inst, ol, oc, sl, sc) => (129 << 56) | ((*num_inst as u64) << 48) | ((*ol as u64) << 40) | ((*oc as u64) << 32) | ((*sl as u64) << 16) | (*sc as u64)  ,
         }
@@ -1550,6 +1584,7 @@ impl std::fmt::Display for Opcode {
             Opcode::DebugBreakpoint => write!(f, "\tDEBUG!"),
             Opcode::AddCell(offset, to) => write!(f, "\tt[{}] += t[{} + {} = {}]", to, to, offset, *to + *offset as i32),
             Opcode::AddnSet0(offset, to) => write!(f, "\tt[{0}] += t[{0} + {1} = {2}]; t[{2}] = 0", to, offset, *to + *offset as i32),
+            Opcode::SubnSet0(offset, to) => write!(f, "\tt[{0}] -= t[{0} + {1} = {2}]; t[{2}] = 0", to, offset, *to + *offset as i32),
             Opcode::SubCell(offset, to) => write!(f, "\tt[{}] += t[{} + {} = {}]", to, to, offset, *to + *offset as i32),
             Opcode::DebugData(num_inst, ol, oc, sl, sc) => write!(f, "\t\twithin code {}@[{}|{} to {}|{}]", num_inst, sl, sc, *sl + *ol as u16, *sc + *oc as u16),
             Opcode::SkipLoop(offset) => write!(f, "\twhile (t[0]) {{ t += {}; }}", offset),
@@ -1618,6 +1653,11 @@ fn simulate(mut opcode: Vec<Opcode>) -> Result<(), std::io::Error> {
             Opcode::AddnSet0(offset, to) => {
                 let readout = tape[(index as isize + *to as isize + *offset as isize) as usize];
                 tape[(index as isize + *to as isize) as usize] += readout;
+                tape[(index as isize + *to as isize + *offset as isize) as usize] = w8::ZERO;
+            },
+            Opcode::SubnSet0(offset, to) => {
+                let readout = tape[(index as isize + *to as isize + *offset as isize) as usize];
+                tape[(index as isize + *to as isize) as usize] -= readout;
                 tape[(index as isize + *to as isize + *offset as isize) as usize] = w8::ZERO;
             },
             Opcode::SubCell(offset, to) => {
@@ -1858,7 +1898,7 @@ pub fn write_opcode<P: AsRef<Path>>(opcodes: &[Opcode], debug_symbols: Option<(&
     let magic_numbers = 0x627261696e66636bu64; // brainfck
     file.write_all(&magic_numbers.to_ne_bytes())?;
     file.write_all(v_bytes)?;
-    let magic_numbers = 0x1717171717171717u64; // MARK_EOF
+    let magic_numbers = 0x1818181818181818u64; // MARK_EOF
     file.write_all(&magic_numbers.to_ne_bytes())?;
     if let Some((debug_symbols, source)) = debug_symbols {
         let debug_bytes = unsafe { debug_symbols.align_to::<u8>().1 };
@@ -1918,9 +1958,9 @@ pub fn main() -> Result<(), std::io::Error> {
     println!("// {} opcodes", optimized_opcodes.len());
     let out_debug = summarize_opcode_symbols(&debug_positions);
     write_opcode(&optimized_opcodes, Some((&out_debug, &contents)), Path::new(file_path).with_extension("lbf"))?;
-    // for (index, i) in optimized_opcodes.iter().enumerate() {
-    //     println!("{}: {}", index, i);
-    // }
+    for (index, i) in optimized_opcodes.iter().enumerate() {
+        println!("{}: {}", index, i);
+    }
     println!("// end of rust part");
     // simulate(optimized_opcodes);
     // println!("{}", gen_ccode(&tree));

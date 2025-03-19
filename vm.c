@@ -10,6 +10,7 @@
 #define HEADER 0x627261696e66636b
 #define INITIAL_BUFFER_SIZE 20
 
+#define DISPATCHER 2 // can be: 0 = SWITCH, 1 = DIRECT, 2 = TAILCALL
 /* #define PROFILE_ALL */
 /* #define ENABLE_DEBUGGER */
 
@@ -104,14 +105,14 @@ typedef struct {
 	uint8_t op;
 } ParsedOpcode;
 
-
+#if DISPATCHER == 2
 typedef struct _ResultingOpcode {
 	void (*handler)(struct _ResultingOpcode* restrict instructions, uint8_t* restrict index, uint8_t reg, uint8_t tmp);
 	int32_t l;
 	int32_t s;
 	uint8_t b;
 } ResultingOpcode;
-
+#endif
 
 char* print_instruction(ParsedOpcode* op);
 
@@ -194,7 +195,9 @@ typedef struct {
 
 typedef struct {
 	ParsedOpcode* opcodes;
+#if DISPATCHER == 2
 	ResultingOpcode* ropcodes;
+#endif
 	int num_opcodes;
 	ParseDebugPos* debug_pos; // list of Debug pos
 	int num_debug_pos;
@@ -211,7 +214,6 @@ typedef struct {
 
 
 
-#define DISPATCHER 0 // can be: 0 = SWITCH, 1 = DIRECT, 2 = TAILCALL
 
 
 
@@ -252,6 +254,7 @@ int run_bytecode(ParseOutput p) {
 #define CASE(x) case x:
 #define DISPATCH PROFILE_INST break;
 #define DISPATCH2
+#define OPCODES_AND = opcodes + 
 #define PC_TYPE_IS(x) pc->op == x
 #elif DISPATCHER == 1
 	static const void* table[] = {
@@ -290,7 +293,9 @@ int run_bytecode(ParseOutput p) {
 #define CASE(x) CASE_ ## x:
 #define PC_TYPE_IS(x) pc->op == x
 #define DISPATCH2
+#define OPCODES_AND = opcodes + 
 #elif DISPATCHER == 2
+	p.ropcodes[0].handler(p.ropcodes, index, reg, tmp);
 	return 0;
 }
 #define CASE(x) void fn_ ## x(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) {
@@ -306,6 +311,7 @@ int run_bytecode(ParseOutput p) {
 #define DISPATCH NEXT_INSTRUCTION; }
 #define DISPATCH2 NEXT_INSTRUCTION; }
 #define PC_TYPE_IS(x) pc->handler == fn_ ## x
+#define OPCODES_AND +=
 #endif
 
 
@@ -377,7 +383,7 @@ int run_bytecode(ParseOutput p) {
 	CASE(JEZ_SHIFT)
 		index += pc->s;
 		if (!*index) {
-			PC(= opcodes + pc->l);
+			PC(OPCODES_AND pc->l);
 			PROFILE_INC(profile_jezs_true);
 		} else {
 			PC(+= 1);
@@ -388,7 +394,7 @@ int run_bytecode(ParseOutput p) {
 		index += pc->s;
 		// 92% success rate for this branch for mandelbrot.lbf
 		if (__builtin_expect(!!*index, 1)) {
-			PC(= opcodes + pc->l);
+			PC(OPCODES_AND pc->l);
 			PROFILE_INC(profile_jnezs_true);
 		} else {
 			PC(+= 1);
@@ -397,7 +403,7 @@ int run_bytecode(ParseOutput p) {
 		DISPATCH;
 	CASE(JEZ)
 		if (!*index) {
-			PC(= opcodes + pc->l);
+			PC(OPCODES_AND pc->l);
 			PROFILE_INC(profile_jez_true);
 		} else {
 			PROFILE_INC(profile_jez_false);
@@ -415,8 +421,7 @@ int run_bytecode(ParseOutput p) {
 		// around 66% success rate, so not enough for __builtin_expect
 		if (*index) {
 			PROFILE_INC(profile_jnez_true);
-			CASE_J:
-			PC(= opcodes + pc->l);
+			PC(OPCODES_AND pc->l);
 		} else {
 			PROFILE_INC(profile_jnez_false);
 			PC(+= 1);
@@ -454,6 +459,10 @@ int run_bytecode(ParseOutput p) {
 #ifdef ENABLE_DEBUGGER
 		goto DEBUG;
 #endif
+		DISPATCH;
+
+	CASE(J)
+		PC(OPCODES_AND pc->l);
 		DISPATCH;
 #ifdef ENABLE_DEBUGGER
 	DEBUG:
@@ -845,6 +854,50 @@ ParseOutput read_opcodes(FILE* fd) {
 		.debug_pos = debug_pos,
 		.line_lengths = line_lengths
 	};
+#if DISPATCHER == 2 
+
+	void (*converter[MARK_EOF+1])(struct _ResultingOpcode* restrict instructions, uint8_t* restrict index, uint8_t reg, uint8_t tmp) = {
+		fn_ADD_CONST,
+		fn_SET_CONST,
+		fn_MUL_CONST,
+		fn_ADD_MUL,
+		fn_ADD_CELL,
+		fn_ADDN_SET0,
+		fn_SUBN_SET0,
+		fn_SUB_CELL,
+		fn_LOAD,
+		fn_LOAD_SWAP,
+		fn_SWAP,
+		fn_LOAD_MUL,
+		fn_ADD_STORE_MUL,
+		fn_SQADD_REG,
+		fn_SHIFT,
+		fn_SHIFT_BIG,
+		fn_READ,
+		fn_WRITE,
+		fn_J,
+		fn_JEZ,
+		fn_JNEZ,
+		fn_JEZ_SHIFT,
+		fn_JNEZ_SHIFT,
+		fn_SKIP_LOOP,
+		fn_MARK_EOF,
+	};
+	ResultingOpcode* ropcodes = malloc(sizeof(ResultingOpcode[num_opcodes]));
+	for (size_t i = 0; i <= num_opcodes; i++){
+		ResultingOpcode converted = {
+			.handler = converter[opcodes[i].op],
+			.l = opcodes[i].l,
+			.s = opcodes[i].s,
+			.b = opcodes[i].b
+		};
+		if (opcodes[i].op == J | opcodes[i].op == JNEZ | opcodes[i].op == JEZ | opcodes[i].op == JNEZ_SHIFT | opcodes[i].op == JEZ_SHIFT ) {
+			converted.l -= i;
+		}
+		ropcodes[i] = converted;
+	}
+	out.ropcodes = ropcodes;
+#endif
 	return out;
 }
 
@@ -945,7 +998,6 @@ int main(int argc, char** argv) {
 	}
 
 	magic_number_check(fd);
-	size_t num_opcodes = 0;
 	ParseOutput parsed = read_opcodes(fd);
 	fclose(fd);
 
