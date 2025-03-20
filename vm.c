@@ -10,7 +10,7 @@
 #define HEADER 0x627261696e66636b
 #define INITIAL_BUFFER_SIZE 20
 
-#define DISPATCHER 2 // can be: 0 = SWITCH, 1 = DIRECT, 2 = TAILCALL
+#define DISPATCHER 3 // can be: 0 = SWITCH, 1 = DIRECT, 2 = TAILCALL, 3 = JIT
 /* #define PROFILE_ALL */
 /* #define ENABLE_DEBUGGER */
 
@@ -111,6 +111,9 @@ typedef struct _ResultingOpcode {
 	int32_t l;
 	int32_t s;
 	uint8_t b;
+#ifdef PROFILE_ALL
+	uint8_t op;
+#endif
 } ResultingOpcode;
 #endif
 
@@ -209,10 +212,14 @@ typedef struct {
 } ParseOutput;
 
 
+#if DISPATCHER < 3
 
 
-
-
+#if DISPATCHER == 2 
+#ifdef PROFILE_ALL
+ResultingOpcode* opcodes;
+#endif /* ifdef PROFILE_ALL */
+#endif
 
 
 
@@ -308,8 +315,8 @@ int run_bytecode(ParseOutput p) {
 #error "Unsupported compiler"
 #endif
 
-#define DISPATCH NEXT_INSTRUCTION; }
-#define DISPATCH2 NEXT_INSTRUCTION; }
+#define DISPATCH PROFILE_INST; NEXT_INSTRUCTION; }
+#define DISPATCH2 PROFILE_INST; NEXT_INSTRUCTION; }
 #define PC_TYPE_IS(x) pc->handler == fn_ ## x
 #define OPCODES_AND +=
 #endif
@@ -604,142 +611,329 @@ int run_bytecode(ParseOutput p) {
 }
 #endif
 
+#elif DISPATCHER == 3
+
+enum registers {
+	RAX = 0,
+	RCX = 1,
+	RDX = 2,
+	RBX = 3,
+	RSP = 4,
+	RBP = 5,
+	RSI = 6,
+	RDI = 7
+};
+
+
+size_t mem_addressing(char* jit_mem, size_t index, uint8_t reg, int32_t to) {
+	if (to == 0) {
+		jit_mem[index++] = reg;
+	} else if (to < 0x80 && to >= -0x80) {
+		jit_mem[index++] = 0x40 | reg;
+		jit_mem[index++] = (char) to;
+	} else {
+		jit_mem[index++] = 0x80 | reg;
+		char* to_ptr = (char*) &to;
+		jit_mem[index++] = to_ptr[0];
+		jit_mem[index++] = to_ptr[1];
+		jit_mem[index++] = to_ptr[2];
+		jit_mem[index++] = to_ptr[3];
+	}
+	return index;
+}
+
+// add     BYTE PTR [<reg>+<to>], <val>
+size_t add_byte_const(char* jit_mem, size_t index, uint8_t reg, int32_t to, uint8_t val) {
+	jit_mem[index++] = 0x80;
+	index = mem_addressing(jit_mem, index, reg, to);
+	jit_mem[index++] = val;
+	return index;
+}
+
+// mov     BYTE PTR [<reg>+<to>], <val>
+size_t set_byte_const(char* jit_mem, size_t index, uint8_t reg, int32_t to, uint8_t val) {
+	jit_mem[index++] = 0xc6;
+	index = mem_addressing(jit_mem, index, reg, to);
+	jit_mem[index++] = val;
+	return index;
+}
+
+// movzx   <to_reg>, BYTE PTR [<from_reg> + <from>]
+//
+// note, that to_reg is 32 bit! (i.e. eax instead of rax)
+size_t move_byte_to_reg(char* jit_mem, size_t index,  uint8_t to_reg, uint8_t from_reg, int32_t from) {
+	jit_mem[index++] = 0x0f;
+	jit_mem[index++] = 0xb6;
+	index = mem_addressing(jit_mem, index, to_reg << 3 | from_reg, from);
+	return index;
+}
+
+
+// mov     BYTE PTR [<to_reg> + <to>], <from_reg>
+size_t move_byte_to_mem(char* jit_mem, size_t index, uint8_t to_reg, uint8_t from_reg, int32_t to) {
+	jit_mem[index++] = 0x88;
+	index = mem_addressing(jit_mem, index, from_reg << 3 | to_reg, to); // yes, here it's the other way around
+	return index;
+}
+
+// add     BYTE PTR [<to_reg> + <to>], <from_reg>
+size_t add_byte_to_mem(char* jit_mem, size_t index,  uint8_t to_reg, uint8_t from_reg, int32_t to) {
+	jit_mem[index++] = 0x00;
+	index = mem_addressing(jit_mem, index, from_reg << 3 | to_reg, to); // yes, here it's the other way around
+	return index;
+}
+
+// sub     BYTE PTR [<to_reg> + <to>], <from_reg>
+size_t sub_byte_to_mem(char* jit_mem, size_t index,  uint8_t to_reg, uint8_t from_reg, int32_t to) {
+	jit_mem[index++] = 0x28;
+	index = mem_addressing(jit_mem, index, from_reg << 3 | to_reg, to); // yes, here it's the other way around
+	return index;
+}
+
+// imul    <to_reg>, <from_reg>, <val>
+//
+// note, that both registers are 32 bit! (i.e. eax instead of rax)
+size_t imul_reg(char* jit_mem, size_t index, uint8_t to_reg, uint8_t from_reg, uint8_t val) {
+	jit_mem[index++] = 0x6b;
+	jit_mem[index++] = 0xc0 | to_reg << 3 | from_reg;
+	jit_mem[index++] = val;
+	return index;
+}
+
+// mov     <to_reg>, <from_reg>
+//
+// note, that both registers are 32 bit!
+size_t mov_regs32(char* jit_mem, size_t index,  uint8_t to_reg, uint8_t from_reg) {
+	jit_mem[index++] = 0x89;
+	jit_mem[index++] = 0xc0 | from_reg << 3 | to_reg;
+	return index;
+}
+
+// mov     <to_reg>, <from_reg>
+//
+// note, that both registers are 64 bit!
+size_t mov_regs64(char* jit_mem, size_t index,  uint8_t to_reg, uint8_t from_reg) {
+	jit_mem[index++] = 0x48;
+	jit_mem[index++] = 0x89;
+	jit_mem[index++] = 0xc0 | from_reg << 3 | to_reg;
+	return index;
+}
+
+// lea     <to_reg>, [<from_reg> + <to>]
+size_t lea_const(char* jit_mem, size_t index, uint8_t to_reg, uint8_t from_reg, int32_t to) {
+	jit_mem[index++] = 0x48;
+	jit_mem[index++] = 0x8d;
+	index = mem_addressing(jit_mem, index, from_reg << 3 | to_reg, to);
+	return index;
+}
+
+size_t movabs_addr(char* jit_mem, size_t index, uint8_t to_reg, void* addr) {
+	jit_mem[index++] = 0x48;
+	jit_mem[index++] = 0xb8 | to_reg;
+	char* to_ptr = (char*) &addr;
+	for (int i = 0; i < 8; i++) {
+		jit_mem[index++] = to_ptr[i];
+	}
+	return index;
+}
+
+size_t call_reg(char* jit_mem, size_t index, uint8_t to_reg) {
+	jit_mem[index++] = 0xff;
+	jit_mem[index++] = 0xd0 | to_reg;
+	return index;
+}
+
+size_t cmp_mem(char* jit_mem, size_t index, uint8_t from_reg, int32_t from, uint8_t val) {
+	jit_mem[index++] = 0x80;
+	if (from == 0) {
+		jit_mem[index++] = 0x38 | from_reg;
+	} else if (from < 0x80 && from >= -0x80) {
+		jit_mem[index++] = 0x78 | from_reg;
+		jit_mem[index++] = (char) from;
+	} else {
+		jit_mem[index++] = 0xb8 | from_reg;
+		char* to_ptr = (char*) &from;
+		jit_mem[index++] = to_ptr[0];
+		jit_mem[index++] = to_ptr[1];
+		jit_mem[index++] = to_ptr[2];
+		jit_mem[index++] = to_ptr[3];
+	}
+	jit_mem[index++] = val;
+	return index;
+}
+
+size_t jne(char* jit_mem, size_t index, int32_t val) {
+	if (val == 0) {
+		perror("0 jump detected");
+	} else if (val < 0x80 && val >= -0x80) {
+		jit_mem[index++] = 0x75;
+		jit_mem[index++] = (char) val;
+	} else {
+		char* to_ptr = (char*) &val;
+		jit_mem[index++] = 0x0f;
+		jit_mem[index++] = 0x85;
+		jit_mem[index++] = to_ptr[0];
+		jit_mem[index++] = to_ptr[1];
+		jit_mem[index++] = to_ptr[2];
+		jit_mem[index++] = to_ptr[3];
+	}
+	return index;
+}
+
+size_t (*jit_compile(ParseOutput p, size_t* num_jit_op)) (char*) {
+	char* jit_mem = mmap(NULL, 0x10000, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (jit_mem == MAP_FAILED) {
+		perror("failed to allocate memory");
+		exit(1);
+	}
+
+	size_t* jit_indices = malloc(sizeof(char*[p.num_opcodes]));
+	size_t index = 0;
+	for (int i = 0; i <= p.num_opcodes; i++) {
+		jit_indices[i] = index;
+		ParsedOpcode op;
+		op = p.opcodes[i];
+		int32_t from;
+		switch (op.op) {
+			case ADD_CONST:                                          // ADD_CONST
+				index = add_byte_const(jit_mem, index, RDI, op.l, op.b);   // add     BYTE PTR [rdi+<to>], <val>
+				break;
+			case SET_CONST:                                          // SET_CONST
+				index = set_byte_const(jit_mem, index, RDI, op.l, op.b);   // mov     BYTE PTR [rdi+<to>], <val>
+				break;
+			case MUL_CONST:                                          // MUL_CONST
+				index = move_byte_to_reg(jit_mem, index, RAX, RDI, op.l);  // movzx   eax, BYTE PTR [rdi + <to>]
+				index = imul_reg(jit_mem, index, RAX, RAX, op.b);          // imul    eax, eax, <val>
+				index = move_byte_to_mem(jit_mem, index, RDI, RAX, op.l);  // mov     BYTE PTR [rdi + <to>], al
+				break;											//     (can be optimized, depending on val)
+			case ADD_MUL:                                            // ADD_MUL
+				index = move_byte_to_reg(jit_mem, index, RAX, RDI, op.l);  // movzx   eax, BYTE PTR [rdi + <from>]
+				index = imul_reg(jit_mem, index, RAX, RAX, op.b);          // imul    eax, eax, <val>
+				index = add_byte_to_mem(jit_mem, index, RDI, RAX, op.l);   // add     BYTE PTR [rdi + <to>], al
+				break;
+			case ADD_CELL:                                           // ADD_CELL
+				index = move_byte_to_reg(jit_mem, index, RAX, RDI, op.l);  // movzx   eax, BYTE PTR [rdi + <from>]
+				index = add_byte_to_mem(jit_mem, index, RDI, RAX, op.l);   // add     BYTE PTR [rdi + <to>], al
+				break;
+			case SUB_CELL:                                           // SUB_CELL
+				index = move_byte_to_reg(jit_mem, index, RAX, RDI, op.l);  // movzx   eax, BYTE PTR [rdi + <from>]
+				index = add_byte_to_mem(jit_mem, index, RDI, RAX, op.l);   // sub     BYTE PTR [rdi + <to>], al
+				break;
+			case ADDN_SET0:                                          // ADDN_SET0
+				from = op.l + op.s;
+				index = move_byte_to_reg(jit_mem, index, RAX, RDI, from);  // movzx   eax, BYTE PTR [rdi + <from>]
+				index = add_byte_to_mem(jit_mem, index, RDI, RAX, op.l);   // add     BYTE PTR [rdi + <to>], al
+				index = set_byte_const(jit_mem, index, RDI, from, 0);      // mov     BYTE PTR [rdi+<from>], 0
+				break;
+			case SUBN_SET0:                                          // SUBN_SET0
+				from = op.l + op.s;
+				index = move_byte_to_reg(jit_mem, index, RAX, RDI, from);  // movzx   eax, BYTE PTR [rdi + <from>]
+				index = sub_byte_to_mem(jit_mem, index, RDI, RAX, op.l);   // sub     BYTE PTR [rdi + <to>], al
+				index = set_byte_const(jit_mem, index, RDI, from, 0);      // mov     BYTE PTR [rdi+<from>], 0
+				break;
+			case LOAD:                                               // LOAD
+				index = move_byte_to_reg(jit_mem, index, RAX, RDI, op.l);  // movzx   eax, BYTE PTR [rdi + <from>]
+				break;
+			case LOAD_SWAP:                                          // LOAD_SWAP
+				index = move_byte_to_reg(jit_mem, index, RCX, RDI, op.l);  // movzx   ecx, BYTE PTR [rdi + <from>]
+				index = move_byte_to_mem(jit_mem, index, RDI, RAX, op.l);  // mov     BYTE PTR [rdi + <from>], al
+				index = mov_regs32(jit_mem, index, RAX, RCX);              // mov     eax, ecx
+				break;
+			case SWAP:                                               // SWAP
+				from = op.l + op.s;
+				index = move_byte_to_reg(jit_mem, index, RCX, RDI, op.l);  // movzx   ecx, BYTE PTR [rdi + <a>]
+				index = move_byte_to_reg(jit_mem, index, RAX, RDI, from);  // movzx   eax, BYTE PTR [rdi + <b>]
+				index = move_byte_to_mem(jit_mem, index, RDI, RAX, op.l);  // mov     BYTE PTR [rdi + <a>], al
+				index = move_byte_to_mem(jit_mem, index, RDI, RCX, from);  // mov     BYTE PTR [rdi + <b>], cl
+				break;
+			case LOAD_MUL:                                           // LOAD_MUL
+				index = move_byte_to_reg(jit_mem, index, RAX, RDI, op.l);  // movzx   eax, BYTE PTR [rdi + <from>]
+				index = imul_reg(jit_mem, index, RAX, RAX, op.b);          // imul    eax, eax, <val>
+				break;
+			case ADD_STORE_MUL:                                      // ADD_STORE_MUL
+				index = imul_reg(jit_mem, index, RCX, RAX, op.b);          // imul    ecx, eax, <val>
+				index = add_byte_to_mem(jit_mem, index, RDI, RCX, op.l);   // mov     BYTE PTR [rdi + <b>], cl
+				break;
+			case SQADD_REG:                                          // SQADD_REG
+				jit_mem[index++] = 0xfe; jit_mem[index++] = 0xc0;          // inc al
+				index = move_byte_to_reg(jit_mem, index, RCX, RDI, op.l);  // movzx ecx, BYTE PTR [rdi + <from>]
+				jit_mem[index++] = 0xf6; jit_mem[index++] = 0xe1;          // mul cl  // gets inserted onto ax, so no info gets lost
+				jit_mem[index++] = 0xd0; jit_mem[index++] = 0xf8;          // sar al
+				break;
+			case SHIFT:                                              // SHIFT
+				index = lea_const(jit_mem, index, RDI, RDI, op.l);         // lea rdi, [rdi + <offset>]
+				break;
+			case SHIFT_BIG:
+			case J:
+				break;
+			case READ:
+				index = mov_regs64(jit_mem, index, RBX, RDI);              // mov     rbx, rdi
+				index = movabs_addr(jit_mem, index, RDX, (void*) getchar); // movabs  rdx, getchar
+				index = call_reg(jit_mem, index, RDX);                     // call    rdx
+				index = move_byte_to_mem(jit_mem, index, RBX, RAX, op.l);  // mov     BYTE PTR [rbx + <to>], al
+				index = mov_regs64(jit_mem, index, RDI, RBX);                // mov     rdi, rbx
+				break;
+			case WRITE:
+				index = move_byte_to_reg(jit_mem, index, RCX, RDI, op.l);  // movzx ecx, BYTE PTR [rdi + <from>]
+				index = mov_regs64(jit_mem, index, RBX, RDI);                // mov     rbx, rdi
+				index = mov_regs64(jit_mem, index, RDI, RCX);                // mov     rdi, rcx
+				index = movabs_addr(jit_mem, index, RDX, (void*) putchar); // movabs  rdx, putchar
+				index = call_reg(jit_mem, index, RDX);                     // call    rdx
+				index = mov_regs64(jit_mem, index, RDI, RBX);                // mov     rdi, rbx
+				break;
+				// TODO: if I'd implement a move_byte_to_reg with 64-bit registers, one could reorder the instructions to save
+				// a move, but the opcodes for it are register dependant, which is annoying
+			case JEZ_SHIFT:
+				index = lea_const(jit_mem, index, RDI, RDI, op.s);         // lea rdi, [rdi + <offset>]
+			case JEZ:
+				index = cmp_mem(jit_mem, index, RDI, op.l, 0);             // cmp     BYTE PTR [rdi + <by>], 0
+				jit_mem[index++] = 0x0f;                                   // je <offset_to>
+				jit_mem[index++] = 0x84;                           // jez is a forward jump, so we don't know where 
+				jit_mem[index++] = 0x0; jit_mem[index++] = 0x0; jit_mem[index++] = 0x0; jit_mem[index++] = 0x0;
+				break;											   // to jump to yet
+			case SKIP_LOOP:
+				index = lea_const(jit_mem, index, RDI, RDI, -op.l);        // lea rdi, [rdi - <offset>]
+				size_t back_index = index;                           // .LABEL
+				index = cmp_mem(jit_mem, index, RDI, op.l, 0);             // cmp     BYTE PTR [rdi + <by>], 0
+				index = lea_const(jit_mem, index, RDI, RDI, op.l);         // lea rdi, [rdi + <offset>]
+				index = jne(jit_mem, index, index - back_index);           // jne     .LABEL
+				break;
+			case JNEZ_SHIFT:
+				index = lea_const(jit_mem, index, RDI, RDI, op.s);         // lea rdi, [rdi + <offset>]
+			case JNEZ:
+				index = cmp_mem(jit_mem, index, RDI, op.l, 0);             // cmp     BYTE PTR [rdi + <by>], 0
+				index = jne(jit_mem, index, index - jit_indices[op.l]);    // jne     <to>
+				break;
+			case MARK_EOF:                                           // MARK_EOF
+				jit_mem[index++] = 0xc3;                                    // ret
+				break;
+		}
+	}
+
+	for (size_t i = 0; i < p.num_opcodes; i++){
+		ParsedOpcode op = p.opcodes[i];
+		if (op.op != JEZ && op.op != JEZ_SHIFT)
+			continue;
+		size_t index = jit_indices[i];
+		char* to = (char*) &op.l;
+		for (size_t j = 0; j < 8; j++) {
+			jit_mem[index + j + 2] = to[j];
+		}
+	}
+	*num_jit_op = index;
+	return (size_t (*)(char*)) jit_mem;
+}
+
+void write_jit_mem(FILE* fd, size_t (*jit_mem)(char*), size_t num_jit_op) {
+	char* j = (char*) jit_mem;
+	for (int i = 0; i < num_jit_op; i++)
+		fputc(j[i], fd);
+}
 
 
 
 
-/* void add_const(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	index[pc->l] += pc->b; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void set_const(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	index[pc->l] = pc->b; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void mul_const(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	index[pc->l] *= pc->b; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void add_mul(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	index[pc->l] += pc->b * index[pc-> l + pc->s]; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void add_cell(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	index[pc->l] += index[pc->l + pc->s]; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void addn_set0(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	index[pc->l] += index[pc->l + pc->s]; */
-/* 	index[pc->l + pc->s] = 0; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void subn_set0(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	index[pc->l] -= index[pc->l + pc->s]; */
-/* 	index[pc->l + pc->s] = 0; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void sub_cell(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	index[pc->l] -= index[pc->l + pc->s]; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void load_swap(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	do { */
-/* 		tmp = index[pc->l]; */
-/* 		index[pc->l] = reg; */
-/* 		reg = tmp; */
-/* 		pc++; */
-/* 	} while (pc->handler == load_swap); */
-/* 	NEXT_INSTRUCTION; } */
-/* void load(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	reg = index[pc->l]; */
-/* 	pc++; */ 
-/* 	do { */
-/* 		tmp = index[pc->l]; */
-/* 		index[pc->l] = reg; */
-/* 		reg = tmp; */
-/* 		pc++; */
-/* 	} while (pc->handler == load_swap); */
-/* 	NEXT_INSTRUCTION; } */
-/* void swap(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	tmp = index[pc->l + pc->s]; */
-/* 	index[pc->l + pc->s] = index[pc->l]; */
-/* 	index[pc->l] = tmp; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void load_mul(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	reg = pc->b * index[pc->l]; */
-/* 	pc++; */
-/* 	reg = pc->b * index[pc->l]; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void add_store_mul(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	reg = pc->b * index[pc->l]; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void sqadd_reg(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	reg += 1; */
-/* 	tmp = index[pc->l]; */
-/* 	reg = tmp & 1 ? (reg >> 1) * tmp : (tmp >> 1) * reg; */
-/* 	pc += 1; */
-/* 	// is always followed by ADD_STORE_MUL */
-/* 	index[pc->l] = reg * pc->b; */
-/* 	pc += 1; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void shift(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	index += pc->l; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void shift_big(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	index += pc->l * U16MAX; */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void read(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	index[pc->l] = getchar(); */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void write(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	putchar(index[pc->l]); */
-/* 	pc++; NEXT_INSTRUCTION; } */
-/* void j(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	pc += pc->l; NEXT_INSTRUCTION; } */
-/* void jnez(ResultingOpcode* restrict pc, uint8_t* restrict index, uint8_t reg, uint8_t tmp) { */
-/* 	pc += pc->l; NEXT_INSTRUCTION; } */
-
-
-/* void (*converter[MARK_EOF])(struct _ResultingOpcode* restrict instructions, uint8_t* restrict index, uint8_t reg, uint8_t tmp) = { */
-/* 	add_const, */
-/* 	set_const, */
-/* 	mul_const, */
-/* 	add_mul, */
-/* 	add_cell, */
-/* 	addn_set0, */
-/* 	subn_set0, */
-/* 	sub_cell, */
-/* 	load, */
-/* 	load_swap, */
-/* 	swap, */
-/* 	load_mul, */
-/* 	add_store_mul, */
-/* 	sqadd_reg, */
-/* 	shift, */
-/* 	shift_big, */
-/* 	read, */
-/* 	write, */
-/* 	j, */
-/* 	/1* jez, *1/ */
-/* 	/1* jnez, *1/ */
-/* 	/1* jez_shift, *1/ */
-/* 	/1* jnez_shift, *1/ */
-/* 	/1* skip_loop, *1/ */
-/* 	/1* mark_eof, *1/ */
-/* 	/1* debug_break, *1/ */
-/* }; */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+#endif
 
 
 
@@ -889,7 +1083,10 @@ ParseOutput read_opcodes(FILE* fd) {
 			.handler = converter[opcodes[i].op],
 			.l = opcodes[i].l,
 			.s = opcodes[i].s,
-			.b = opcodes[i].b
+			.b = opcodes[i].b,
+#ifdef PROFILE_ALL
+			.op = opcodes[i].op
+#endif
 		};
 		if (opcodes[i].op == J | opcodes[i].op == JNEZ | opcodes[i].op == JEZ | opcodes[i].op == JNEZ_SHIFT | opcodes[i].op == JEZ_SHIFT ) {
 			converted.l -= i;
@@ -999,9 +1196,30 @@ int main(int argc, char** argv) {
 
 	magic_number_check(fd);
 	ParseOutput parsed = read_opcodes(fd);
+#if DISPATCHER == 2
+#ifdef PROFILE_ALL
+	opcodes = parsed.ropcodes;
+#endif
+#endif
 	fclose(fd);
-
+#if DISPATCHER < 3
 	run_bytecode(parsed);
+#else
+	size_t num_jit_op = 0;
+	size_t (*jit_mem)(char*);
+	jit_mem = jit_compile(parsed, &num_jit_op);
+	FILE* fd_out = fopen("jitout.out", "wb");
+	write_jit_mem(fd_out, jit_mem, num_jit_op);
+	fclose(fd_out);
+
+	uint8_t* tape = mmap(NULL, U16MAX, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (tape == MAP_FAILED) {
+		perror("failed to allocate memory");
+		exit(1);
+	}
+	printf("RUNNING\n");
+	jit_mem(tape + INITIAL_INDEX);
+#endif
 	free(parsed.translated);
 	free(parsed.debug_pos);
 	free(parsed.opcodes);
