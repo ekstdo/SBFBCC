@@ -399,7 +399,7 @@ impl BFAffineT<isize> for BFAddMap {
                     let mut o = *o;
                     let mut back_index = index as isize - 1;
                     while back_index >= 0 {
-                        println!("{:?}", out_opcode);
+                        // println!("{:?}", out_opcode);
                         let Some(Opcode::SetConst(_, _)) = out_opcode.get(index) else {panic!("Wrong check! {index} {back_index}")};
                         match &out_opcode[back_index as usize] {
                             Opcode::AddCell(offset, to) => {
@@ -1958,12 +1958,14 @@ pub fn main() -> Result<(), std::io::Error> {
     println!("// {} opcodes", optimized_opcodes.len());
     let out_debug = summarize_opcode_symbols(&debug_positions);
     write_opcode(&optimized_opcodes, Some((&out_debug, &contents)), Path::new(file_path).with_extension("lbf"))?;
+    println!("/*\n");
     for (index, i) in optimized_opcodes.iter().enumerate() {
         println!("{}: {}", index, i);
     }
+    println!("*/\n");
     println!("// end of rust part");
     // simulate(optimized_opcodes);
-    // println!("{}", gen_ccode(&tree));
+    println!("{}", gen_ccode(&tree));
     Ok(())
 }
 
